@@ -42,6 +42,9 @@
 unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
+int hrrn_max_lifetime					= 10000;	// in ms, (10s)
+int hrrn_latency					= 0;		// in us, 6000=6ms
+
 /*
  * The initial- and re-scaling of tunables is configurable
  *
@@ -1594,6 +1597,16 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 static void
 set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
+	/* 'current' is not kept within the tree. */
+	if (se->on_rq) {
+		/*
+		 * Any task has to be enqueued before it get to execute on
+		 * a CPU. So account for the time it spent waiting on the
+		 * runqueue.
+		 */
+		update_stats_wait_end(cfs_rq, se);
+	}
+
 	update_stats_curr_start(cfs_rq, se);
 	cfs_rq->curr = se;
 
@@ -3619,13 +3632,12 @@ preempt:
 
 static inline void reset_lifetime(u64 now, struct sched_entity *se)
 {
-	u64 lifetime =  10000000000ULL; // 10s
 	s64 diff;
 
-	diff = (now - se->hrrn_start_time) - lifetime;
+	diff = (now - se->hrrn_start_time) - (hrrn_max_lifetime * 1000000ULL);
 
 	if (diff > 0) {
-		se->hrrn_start_time = now;
+		se->hrrn_start_time = now - 2ULL;
 		se->hrrn_sum_exec_runtime = 0;
 	}
 }
@@ -6740,7 +6752,8 @@ static void task_fork_fair(struct task_struct *p)
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
-	p->se.hrrn_start_time = rq_clock_task(rq) + sysctl_sched_latency;
+	// (hrrn_latency * 1000) converts to ns
+	p->se.hrrn_start_time = rq_clock_task(rq) + (hrrn_latency * 1000ULL);
 
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;
