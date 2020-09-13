@@ -81,23 +81,23 @@ calculation for R value:
 	u64 vr_curr   = curr->hrrn_sum_exec_runtime + 1;
 	u64 vr_se   = se->hrrn_sum_exec_runtime   + 1;
 	s64 diff;
-	
+
 	diff = now - curr->hrrn_start_time;
 	if (diff > 0)
 		w_curr  = diff;
-	
+
 	diff = now - se->hrrn_start_time;
 	if (diff > 0)
 		w_se  = diff;
-	
+
 	// adjusting for priorities
 	w_curr  *= (140 - t_curr->prio);
 	w_se  *= (140 - t_se->prio);
-	
+
 	r_curr  = w_curr / vr_curr;
 	r_se  = w_se / vr_se;
 	diff  = r_se - r_curr;
-	
+
 	// take the remainder if equal
 	if (diff == 0)
 	{
@@ -108,7 +108,7 @@ calculation for R value:
 
 	if (diff > 0)
 		return 1;
-		
+
 	return -1;
 
 2.1 More about HRRN algorithm
