@@ -14,8 +14,8 @@ and it is based on Highest Response Ratio Next (HRRN) policy.
   - All balancing code is removed except for idle CPU balancing. There is no
     periodic balancing, only idle CPU balancing is applied. Once a task is
     assigned to a CPU, it sticks with it until another CPUS got idle then this
-    task might get pulled to new cpu. The reason of disabling periodic balancing
-    is to utilize the CPU cache of tasks.
+    task might get pulled to new cpu. The reason of disabling periodic
+    balancing is to utilize the CPU cache of tasks.
 
   - No grouping for tasks, FAIR_GROUP_SCHED must be disabled.
 
@@ -36,7 +36,8 @@ and it is based on Highest Response Ratio Next (HRRN) policy.
   - This scheduler is designed for desktop usage since it is about
     responsiveness. It may be not bad for servers.
 
-  - Cachy might be good for mobiles or Android since it has high responsiveness.
+  - Cachy might be good for mobiles or Android since it has high
+    responsiveness.
     Cachy need to be integrated to Android, I don't think the current version
     it is ready to go without some tweeking and adapting to Android hacks.
 
@@ -153,8 +154,8 @@ Therefore, the original HRRN needs some modifications.
 3. HRRN Tunables
 =================
 
-We have implemented two modifications that enhances HRRN to work as a preemptive
-policy:
+We have implemented two modifications that enhances HRRN to work as a
+preemptive policy:
 
 
 3.1 HRRN maximum life time
@@ -168,35 +169,37 @@ at run time by the following sysctl command:
 
 	sysctl kernel.sched_hrrn_max_lifetime_ms=60000
 
-The value is in milliseconds, the above command changes hrrn_max_lifetime from 10s
-to 60s.
+The value is in milliseconds, the above command changes hrrn_max_lifetime from
+10s to 60s.
 
 
 3.2 HRRN latency
 -----------------
 
-A new task could overcome old tasks because it has 1 sum execution, and lets say
-its age is few microseconds 7000ns (7us). This new task will have HRRN = 7000 which
-is high compared with older tasks. That's why we proposed hrrn_latency which is in
-microseconds. When a new task is forked, the hrrn_start_time is set to (current
-time in nano + hrrn_latency). The default value of hrrn_latency is 0. This value
-can be changed by the following:
+A new task could overcome old tasks because it has 1 sum execution, and lets
+say its age is few microseconds 7000ns (7us). This new task will have
+HRRN =7000 which is high compared with older tasks. That's why we proposed
+hrrn_latency which is in microseconds. When a new task is forked, the
+hrrn_start_time is set to (current time in nano + hrrn_latency). The default
+value of hrrn_latency is 0. This value can be changed by the following:
 
 	sysctl kernel.sched_hrrn_latency_us=6000
 
 This sets hrrn_latency to 6ms. Notice that a new task will have HRRN=1 for this
-period of time. Notice also that if no runnable tasks other than this new task, this
-task will run. Adding 6ms doesn't mean that a new task will pause for 6ms.
+period of time. Notice also that if no runnable tasks other than this new task,
+this task will run. Adding 6ms doesn't mean that a new task will pause for 6ms.
 It means it will have HRRN=1 or 0 for 6ms. It depends on how many other task on
 the run queue and whether they have higher HRRN or not. This will solve a
-problem when having heavy compilation with -j5 on 4CPUS machine. The compilation
-will create new threads for each file and that might cause freezes and hangups.
-Technically those new threads could have higher HRRN values than Xorg or whatever
-old running desktop tasks.
+problem when having heavy compilation with -j5 on 4CPUS machine. The
+compilation will create new threads for each file and that might cause freezes
+and hangups.
+
+Technically those new threads could have higher HRRN values than Xorg or
+whatever old running desktop tasks.
 
 Having said that, the default value is 0, on my machine this value doesn't make
-any problems and I don't have any freezes when compiling kernel unless I changed
-it to -500000000. It depends on your machine and on how fast is your HD drive.
+any problems and don't have any freezes when compiling kernel unless changed it
+to -500000000. It depends on your machine and on how fast is your HD drive.
 
 
 4. Priorities
