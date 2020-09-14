@@ -5419,6 +5419,8 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
 			env->imbalance = max_t(long, 0, (local->idle_cpus -
 						 busiest->idle_cpus) >> 1);
 		}
+
+		return;
 	}
 
 	/*
@@ -6915,7 +6917,7 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 #ifdef CONFIG_SMP
 	raw_spin_lock_init(&cfs_rq->removed.lock);
 #endif
-	cfs_rq->head            = NULL;
+	cfs_rq->head = NULL;
 }
 
 void free_fair_sched_group(struct task_group *tg) { }
