@@ -821,6 +821,18 @@ config UCLAMP_BUCKETS_COUNT
 
 endmenu
 
+config CACHY_SCHED
+	bool "Cachy CPU scheduler"
+	default y
+	help
+	  The Cachy scheduler that utilizes CPU cache and it is based on Highest
+	  Response Ratio Next (HRRN) policy.
+
+	  Is designed for desktop usage since it is about responsiveness.
+	  It may be not bad for servers.
+
+	  If unsure, say Y here.
+
 #
 # For architectures that want to enable the support for NUMA-affine scheduler
 # balancing logic:
@@ -938,6 +950,7 @@ config CGROUP_WRITEBACK
 
 menuconfig CGROUP_SCHED
 	bool "CPU controller"
+	depends on !CACHY_SCHED
 	default n
 	help
 	  This feature lets CPU scheduler recognize task groups and control CPU
@@ -1200,15 +1213,25 @@ config CHECKPOINT_RESTORE
 
 config SCHED_AUTOGROUP
 	bool "Automatic process group scheduling"
-	select CGROUPS
-	select CGROUP_SCHED
-	select FAIR_GROUP_SCHED
+	depends on FAIR_GROUP_SCHED && !CACHY_SCHED
 	help
 	  This option optimizes the scheduler for common desktop workloads by
 	  automatically creating and populating task groups.  This separation
 	  of workloads isolates aggressive CPU burners (like build jobs) from
 	  desktop applications.  Task group autogeneration is currently based
 	  upon task session.
+
+config SCHED_AUTOGROUP_DEFAULT_ENABLED
+	bool "Enable automatic process group scheduling feature"
+	default y
+	depends on SCHED_AUTOGROUP
+	help
+	  If set, automatic process group scheduling will be enabled per
+	  default but can be disabled through passing autogroup=0 on the
+	  kernel commandline during boot or a value of 0 via the file
+	  proc/sys/kernel/sched_autogroup_enabled.
+
+	  If unsure say Y.
 
 config SYSFS_DEPRECATED
 	bool "Enable deprecated sysfs features to support old userspace tools"
@@ -1306,7 +1329,6 @@ config CC_OPTIMIZE_FOR_PERFORMANCE
 
 config CC_OPTIMIZE_FOR_PERFORMANCE_O3
 	bool "Optimize more for performance (-O3)"
-	depends on ARC
 	help
 	  Choosing this option will pass "-O3" to your compiler to optimize
 	  the kernel yet more for performance.
@@ -2202,8 +2224,8 @@ config MODULE_COMPRESS
 	bool "Compress modules on installation"
 	help
 
-	  Compresses kernel modules when 'make modules_install' is run; gzip or
-	  xz depending on "Compression algorithm" below.
+	  Compresses kernel modules when 'make modules_install' is run; gzip,
+	  xz, or zstd depending on "Compression algorithm" below.
 
 	  module-init-tools MAY support gzip, and kmod MAY support gzip and xz.
 
@@ -2225,13 +2247,16 @@ choice
 	  This determines which sort of compression will be used during
 	  'make modules_install'.
 
-	  GZIP (default) and XZ are supported.
+	  GZIP (default), XZ, and ZSTD are supported.
 
 config MODULE_COMPRESS_GZIP
 	bool "GZIP"
 
 config MODULE_COMPRESS_XZ
 	bool "XZ"
+
+config MODULE_COMPRESS_ZSTD
+	bool "ZSTD"
 
 endchoice
 

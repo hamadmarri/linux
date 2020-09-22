@@ -63,7 +63,7 @@ const_debug unsigned int sysctl_sched_features =
  * Number of tasks to iterate in a single balance run.
  * Limited because this is done with IRQs disabled.
  */
-const_debug unsigned int sysctl_sched_nr_migrate = 32;
+const_debug unsigned int sysctl_sched_nr_migrate = 256;
 
 /*
  * period over which we measure -rt task CPU usage in us.
@@ -75,9 +75,9 @@ __read_mostly int scheduler_running;
 
 /*
  * part of the period that we allow rt tasks to run in us.
- * default: 0.95s
+ * XanMod default: 0.98s
  */
-int sysctl_sched_rt_runtime = 950000;
+int sysctl_sched_rt_runtime = 980000;
 
 
 /*
@@ -3655,7 +3655,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	return rq;
 }
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && !defined(CONFIG_CACHY_SCHED)
 
 /* rq->lock is NOT held, but preemption is disabled */
 static void __balance_callback(struct rq *rq)
@@ -4004,7 +4004,9 @@ void scheduler_tick(void)
 
 	perf_event_task_tick();
 
-#ifdef CONFIG_SMP
+#if defined(CONFIG_SMP) && defined(CONFIG_CACHY_SCHED)
+	rq->idle_balance = idle_cpu(cpu);
+#elif CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq);
 #endif
@@ -7066,6 +7068,10 @@ void __init sched_init(void)
 	       &rt_sched_class + 1   != &dl_sched_class);
 #ifdef CONFIG_SMP
 	BUG_ON(&dl_sched_class + 1 != &stop_sched_class);
+#endif
+
+#ifdef CONFIG_CACHY_SCHED
+	printk(KERN_INFO "Cachy CPU scheduler v5.9-r1 by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();
