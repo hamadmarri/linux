@@ -481,6 +481,7 @@ struct sched_entity {
 #ifdef CONFIG_CACHY_SCHED
 	struct sched_entity* 		next;
 	struct sched_entity* 		prev;
+	u64				hrrn_start_time;
 #endif
 	struct list_head		group_node;
 	unsigned int			on_rq;
@@ -705,6 +706,7 @@ struct task_struct {
 #endif
 	int				on_rq;
 
+	int				original_prio;
 	int				prio;
 	int				static_prio;
 	int				normal_prio;
