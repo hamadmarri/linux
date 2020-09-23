@@ -3655,7 +3655,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	return rq;
 }
 
-#if defined(CONFIG_SMP) && !defined(CONFIG_CACHY_SCHED)
+#if defined(CONFIG_SMP) // && !defined(CONFIG_CACHY_SCHED)
 
 /* rq->lock is NOT held, but preemption is disabled */
 static void __balance_callback(struct rq *rq)
@@ -4004,9 +4004,9 @@ void scheduler_tick(void)
 
 	perf_event_task_tick();
 
-#if defined(CONFIG_SMP) && defined(CONFIG_CACHY_SCHED)
-	rq->idle_balance = idle_cpu(cpu);
-#elif CONFIG_SMP
+//#if defined(CONFIG_SMP) && defined(CONFIG_CACHY_SCHED)
+	//rq->idle_balance = idle_cpu(cpu);
+#if CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq);
 #endif
