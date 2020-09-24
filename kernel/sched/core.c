@@ -3235,7 +3235,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
 	 */
-	p->prio = current->normal_prio;
+	p->prio = current->original_prio;
 
 	uclamp_fork(p);
 
@@ -4957,6 +4957,8 @@ void set_user_nice(struct task_struct *p, long nice)
 	struct rq_flags rf;
 	struct rq *rq;
 
+	nice = NICE_TO_PRIO(nice) - p->static_prio;
+
 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
 		return;
 	/*
@@ -4984,6 +4986,7 @@ void set_user_nice(struct task_struct *p, long nice)
 		put_prev_task(rq, p);
 
 	p->static_prio = NICE_TO_PRIO(nice);
+	p->original_prio = p->static_prio;
 
 	set_load_weight(p, true);
 	old_prio = p->prio;
@@ -7201,6 +7204,7 @@ void __init sched_init(void)
 		atomic_set(&rq->nr_iowait, 0);
 	}
 
+	init_task.original_prio = init_task.static_prio;
 	set_load_weight(&init_task, false);
 
 	/*

@@ -208,10 +208,10 @@ SYSCALL_DEFINE3(setpriority, int, which, int, who, int, niceval)
 
 	/* normalize: avoid signed division (rounding problems) */
 	error = -ESRCH;
-	if (niceval < MIN_NICE)
-		niceval = MIN_NICE;
-	if (niceval > MAX_NICE)
-		niceval = MAX_NICE;
+	//if (niceval < MIN_NICE)
+		//niceval = MIN_NICE;
+	//if (niceval > MAX_NICE)
+		//niceval = MAX_NICE;
 
 	rcu_read_lock();
 	read_lock(&tasklist_lock);
