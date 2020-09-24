@@ -3235,7 +3235,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
 	 */
-	p->prio = current->original_prio;
+	p->prio = current->normal_prio;
 
 	uclamp_fork(p);
 
@@ -3655,7 +3655,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	return rq;
 }
 
-#if defined(CONFIG_SMP) // && !defined(CONFIG_CACHY_SCHED)
+#if defined(CONFIG_SMP)
 
 /* rq->lock is NOT held, but preemption is disabled */
 static void __balance_callback(struct rq *rq)
@@ -4004,8 +4004,6 @@ void scheduler_tick(void)
 
 	perf_event_task_tick();
 
-//#if defined(CONFIG_SMP) && defined(CONFIG_CACHY_SCHED)
-	//rq->idle_balance = idle_cpu(cpu);
 #if CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq);
@@ -4959,8 +4957,6 @@ void set_user_nice(struct task_struct *p, long nice)
 	struct rq_flags rf;
 	struct rq *rq;
 
-	nice = NICE_TO_PRIO(nice) - p->static_prio;
-
 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
 		return;
 	/*
@@ -4988,7 +4984,6 @@ void set_user_nice(struct task_struct *p, long nice)
 		put_prev_task(rq, p);
 
 	p->static_prio = NICE_TO_PRIO(nice);
-	p->original_prio = p->static_prio;
 
 	set_load_weight(p, true);
 	old_prio = p->prio;
@@ -7206,7 +7201,6 @@ void __init sched_init(void)
 		atomic_set(&rq->nr_iowait, 0);
 	}
 
-	init_task.original_prio = init_task.static_prio;
 	set_load_weight(&init_task, false);
 
 	/*

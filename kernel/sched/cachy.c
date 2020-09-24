@@ -43,7 +43,6 @@ unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 int hrrn_max_lifetime					= 20000;	// in ms
-int hrrn_latency					= 0;		// in us
 
 /*
  * The initial- and re-scaling of tunables is configurable
@@ -4203,19 +4202,6 @@ static inline void reset_lifetime(u64 now, struct sched_entity *se)
 	if (diff > 0) {
 		se->hrrn_start_time = now - 2000000ULL;
 		se->vruntime = 1ULL;
-
-#if defined(CONFIG_FAIR_GROUP_SCHED)
-		if (entity_is_task(se)) {
-#endif
-			// reset priority
-			struct task_struct *p = task_of(se);
-			p->static_prio = p->original_prio;
-			p->prio = p->normal_prio = p->original_prio;
-			reweight_task(p, p->original_prio - MAX_RT_PRIO);
-
-#if defined(CONFIG_FAIR_GROUP_SCHED)
-		}
-#endif
 	}
 }
 
@@ -6380,7 +6366,7 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
 	struct task_struct *p;
-	int new_tasks, new_prio;
+	int new_tasks;
 
 again:
 	if (!sched_fair_runnable(rq))
@@ -6476,15 +6462,6 @@ simple:
 	p = task_of(se);
 
 done: __maybe_unused;
-
-	if (p->prio > p->original_prio) {
-		new_prio = p->static_prio - 1;
-		p->static_prio = new_prio;
-		p->prio = p->normal_prio = new_prio;
-		reweight_task(p, new_prio - MAX_RT_PRIO);
-	}
-
-
 #ifdef CONFIG_SMP
 	/*
 	 * Move the next running task to the front of
@@ -10088,22 +10065,8 @@ static void task_fork_fair(struct task_struct *p)
 
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;
-	if (curr) {
+	if (curr)
 		update_curr(cfs_rq);
-
-		prio = p->static_prio - task_of(curr)->static_prio;
-		prio += task_of(curr)->original_prio;
-
-		if (prio >= 120)
-			new_prio = 139;
-		else
-			new_prio = prio;
-
-		p->original_prio = prio;
-		p->static_prio = new_prio;
-		p->prio = p->normal_prio = new_prio;
-		reweight_task(p, new_prio - MAX_RT_PRIO);
-	}
 
 	rq_unlock(rq, &rf);
 }
