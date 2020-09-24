@@ -2845,6 +2845,39 @@ void init_numa_balancing(unsigned long clone_flags, struct task_struct *p)
 	}
 }
 
+/*
+ * Drive the periodic memory faults..
+ */
+static void task_tick_numa(struct rq *rq, struct task_struct *curr)
+{
+	struct callback_head *work = &curr->numa_work;
+	u64 period, now;
+
+	/*
+	 * We don't care about NUMA placement if we don't have memory.
+	 */
+	if ((curr->flags & (PF_EXITING | PF_KTHREAD)) || work->next != work)
+		return;
+
+	/*
+	 * Using runtime rather than walltime has the dual advantage that
+	 * we (mostly) drive the selection from busy threads and that the
+	 * task needs to have done some actual work before we bother with
+	 * NUMA placement.
+	 */
+	now = curr->se.sum_exec_runtime;
+	period = (u64)curr->numa_scan_period * NSEC_PER_MSEC;
+
+	if (now > curr->node_stamp + period) {
+		if (!curr->node_stamp)
+			curr->numa_scan_period = task_scan_start(curr);
+		curr->node_stamp += period;
+
+		if (!time_before(jiffies, curr->mm->numa_next_scan))
+			task_work_add(curr, work, true);
+	}
+}
+
 static void update_scan_period(struct task_struct *p, int new_cpu)
 {
 	int src_nid = cpu_to_node(task_cpu(p));
@@ -2880,6 +2913,9 @@ static void update_scan_period(struct task_struct *p, int new_cpu)
 }
 
 #else
+static void task_tick_numa(struct rq *rq, struct task_struct *curr)
+{
+}
 
 static inline void account_numa_enqueue(struct rq *rq, struct task_struct *p)
 {
@@ -10041,6 +10077,9 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		entity_tick(cfs_rq, se, queued);
 	}
 
+	if (static_branch_unlikely(&sched_numa_balancing))
+		task_tick_numa(rq, curr);
+
 	update_misfit_status(curr, rq);
 	update_overutilized_status(task_rq(curr));
 }
@@ -10056,7 +10095,6 @@ static void task_fork_fair(struct task_struct *p)
 	struct sched_entity *curr;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
-	int prio, new_prio;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
