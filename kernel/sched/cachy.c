@@ -6270,7 +6270,7 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	if (rq->nr_running)
 		return 1;
 
-	return 0;
+	return newidle_balance(rq, rf) != 0;
 }
 #endif /* CONFIG_SMP */
 
