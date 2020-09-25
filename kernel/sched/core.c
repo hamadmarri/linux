@@ -3237,6 +3237,7 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	 */
 #ifdef CONFIG_CACHY_SCHED
 	p->prio = current->original_prio;
+	p->original_prio = current->original_prio;
 #else
 	p->prio = current->normal_prio;
 #endif
@@ -3341,6 +3342,14 @@ void wake_up_new_task(struct task_struct *p)
 
 	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
 	p->state = TASK_RUNNING;
+
+#ifdef CONFIG_CACHY_SCHED
+	if (p->pid > 1 && p->original_prio >= 120) {
+		p->prio = p->static_prio = p->normal_prio = 139;
+		set_load_weight(p, true);
+	}
+#endif
+
 #ifdef CONFIG_SMP
 	/*
 	 * Fork balancing, do it here and not earlier because:
@@ -4962,7 +4971,8 @@ void set_user_nice(struct task_struct *p, long nice)
 	struct rq *rq;
 
 #ifdef CONFIG_CACHY_SCHED
-	nice = NICE_TO_PRIO(nice) - p->static_prio;
+	if (p->static_prio > p->original_prio)
+		nice = NICE_TO_PRIO(nice) - p->static_prio;
 #endif
 
 	if (task_nice(p) == nice || nice < MIN_NICE || nice > MAX_NICE)
@@ -4995,6 +5005,9 @@ void set_user_nice(struct task_struct *p, long nice)
 
 #ifdef CONFIG_CACHY_SCHED
 	p->original_prio = p->static_prio;
+
+	if (p->original_prio >= 120)
+		p->prio = p->static_prio = p->normal_prio = 139;
 #endif
 
 	set_load_weight(p, true);

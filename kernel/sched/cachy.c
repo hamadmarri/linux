@@ -4234,18 +4234,21 @@ static inline void reset_lifetime(u64 now, struct sched_entity *se)
 		se->hrrn_start_time = now - 2000000ULL;
 		se->vruntime = 1ULL;
 
-#if defined(CONFIG_FAIR_GROUP_SCHED)
-		if (entity_is_task(se)) {
-#endif
-			// reset priority
-			struct task_struct *p = task_of(se);
-			p->static_prio = p->original_prio;
-			p->prio = p->normal_prio = p->original_prio;
-			reweight_task(p, p->original_prio - MAX_RT_PRIO);
+//#if defined(CONFIG_FAIR_GROUP_SCHED)
+		//if (entity_is_task(se)) {
+//#endif
+			//struct task_struct *p = task_of(se);
+			//if (p->static_prio > p->original_prio) {
+				//// reset priority
+				
+				//p->static_prio = p->static_prio - 1; // p->original_prio;
+				//p->prio = p->normal_prio = p->original_prio;
+				//reweight_task(p, p->original_prio - MAX_RT_PRIO);
+			//}
 
-#if defined(CONFIG_FAIR_GROUP_SCHED)
-		}
-#endif
+//#if defined(CONFIG_FAIR_GROUP_SCHED)
+		//}
+//#endif
 	}
 }
 
@@ -5382,6 +5385,16 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
 
+	if (task_sleep) {
+		// reset priority
+		if (p->static_prio > p->original_prio) {
+			p->static_prio = p->static_prio - 1;
+			p->static_prio = p->static_prio;
+			p->prio = p->normal_prio = p->static_prio;
+			reweight_task(p, p->static_prio - MAX_RT_PRIO);
+		}
+	}
+
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
 		dequeue_entity(cfs_rq, se, flags);
@@ -6507,12 +6520,12 @@ simple:
 
 done: __maybe_unused;
 
-	if (p->prio > p->original_prio) {
-		new_prio = p->static_prio - 1;
-		p->static_prio = new_prio;
-		p->prio = p->normal_prio = new_prio;
-		reweight_task(p, new_prio - MAX_RT_PRIO);
-	}
+	//if (p->static_prio > p->original_prio) {
+		//new_prio = p->static_prio - 1;
+		//p->static_prio = new_prio;
+		//p->prio = p->normal_prio = new_prio;
+		//reweight_task(p, new_prio - MAX_RT_PRIO);
+	//}
 
 #ifdef CONFIG_SMP
 	/*
@@ -6585,7 +6598,7 @@ static void yield_task_fair(struct rq *rq)
 {
 	struct task_struct *curr = rq->curr;
 	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
-
+	
 	/*
 	 * Are we the only task in the tree?
 	 */
@@ -10110,33 +10123,30 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
-	struct sched_entity *curr;
+	struct sched_entity *se = &p->se, *curr;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
-	int prio, new_prio;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
 
-	p->se.hrrn_start_time = p->start_time;
+	se->hrrn_start_time = p->start_time;
 
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;
 	if (curr) {
 		update_curr(cfs_rq);
+		//se->vruntime = curr->vruntime;
 
-		prio = p->static_prio - task_of(curr)->static_prio;
-		prio += task_of(curr)->original_prio;
+//#if defined(CONFIG_FAIR_GROUP_SCHED)
+		//if (entity_is_task(se)) {
+//#endif
 
-		if (prio >= 120)
-			new_prio = 139;
-		else
-			new_prio = prio;
+		//se->hrrn_start_time = task_of(curr)->start_time;
 
-		p->original_prio = prio;
-		p->static_prio = new_prio;
-		p->prio = p->normal_prio = new_prio;
-		reweight_task(p, new_prio - MAX_RT_PRIO);
+//#if defined(CONFIG_FAIR_GROUP_SCHED)
+		//}
+//#endif
 	}
 
 	rq_unlock(rq, &rf);
