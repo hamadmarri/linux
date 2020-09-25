@@ -4231,7 +4231,7 @@ static inline void reset_lifetime(u64 now, struct sched_entity *se)
 	diff = (now - se->hrrn_start_time) - (hrrn_max_lifetime * 1000000ULL);
 
 	if (diff > 0) {
-		se->hrrn_start_time = now - 2000000ULL;
+		se->hrrn_start_time = now; // - 2000000ULL;
 		se->vruntime = 1ULL;
 
 //#if defined(CONFIG_FAIR_GROUP_SCHED)
@@ -6339,11 +6339,15 @@ wakeup_preempt_entity(u64 now, struct sched_entity *curr, struct sched_entity *s
 	u64 vr_se	= se->vruntime + 1;
 	s64 diff;
 
-	if (vr_curr == 1)
-		curr->hrrn_start_time	= now - 1000000ULL;
+	if (vr_curr == 1) {
+		curr->hrrn_start_time	= now;
+		curr->vruntime = 1;
+	}
 
-	if (vr_se == 1)
-		se->hrrn_start_time	= now - 1000000ULL;
+	if (vr_se == 1) {
+		se->hrrn_start_time	= now;
+		se->vruntime = 1;
+	}
 
 	l_curr	= now - curr->hrrn_start_time;
 	l_se	= now - se->hrrn_start_time;
@@ -6519,14 +6523,6 @@ simple:
 	p = task_of(se);
 
 done: __maybe_unused;
-
-	//if (p->static_prio > p->original_prio) {
-		//new_prio = p->static_prio - 1;
-		//p->static_prio = new_prio;
-		//p->prio = p->normal_prio = new_prio;
-		//reweight_task(p, new_prio - MAX_RT_PRIO);
-	//}
-
 #ifdef CONFIG_SMP
 	/*
 	 * Move the next running task to the front of
@@ -6598,7 +6594,7 @@ static void yield_task_fair(struct rq *rq)
 {
 	struct task_struct *curr = rq->curr;
 	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
-	
+
 	/*
 	 * Are we the only task in the tree?
 	 */
@@ -10131,6 +10127,7 @@ static void task_fork_fair(struct task_struct *p)
 	update_rq_clock(rq);
 
 	se->hrrn_start_time = p->start_time;
+	se->vruntime = 0;
 
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;
@@ -10142,7 +10139,7 @@ static void task_fork_fair(struct task_struct *p)
 		//if (entity_is_task(se)) {
 //#endif
 
-		//se->hrrn_start_time = task_of(curr)->start_time;
+			//se->hrrn_start_time = task_of(curr)->start_time;
 
 //#if defined(CONFIG_FAIR_GROUP_SCHED)
 		//}
