@@ -4231,24 +4231,8 @@ static inline void reset_lifetime(u64 now, struct sched_entity *se)
 	diff = (now - se->hrrn_start_time) - (hrrn_max_lifetime * 1000000ULL);
 
 	if (diff > 0) {
-		se->hrrn_start_time = now; // - 2000000ULL;
+		se->hrrn_start_time = now - 2000000ULL;
 		se->vruntime = 1ULL;
-
-//#if defined(CONFIG_FAIR_GROUP_SCHED)
-		//if (entity_is_task(se)) {
-//#endif
-			//struct task_struct *p = task_of(se);
-			//if (p->static_prio > p->original_prio) {
-				//// reset priority
-				
-				//p->static_prio = p->static_prio - 1; // p->original_prio;
-				//p->prio = p->normal_prio = p->original_prio;
-				//reweight_task(p, p->original_prio - MAX_RT_PRIO);
-			//}
-
-//#if defined(CONFIG_FAIR_GROUP_SCHED)
-		//}
-//#endif
 	}
 }
 
@@ -5385,15 +5369,14 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
 
-	if (task_sleep) {
-		// reset priority
-		if (p->static_prio > p->original_prio) {
-			p->static_prio = p->static_prio - 1;
-			p->static_prio = p->static_prio;
-			p->prio = p->normal_prio = p->static_prio;
-			reweight_task(p, p->static_prio - MAX_RT_PRIO);
-		}
-	}
+	////if (task_sleep) {
+		//// reset priority
+		//if (p->static_prio > p->original_prio) {
+			//p->static_prio = p->original_prio;
+			//p->prio = p->normal_prio = p->static_prio;
+			//reweight_task(p, p->static_prio - MAX_RT_PRIO);
+		//}
+	////}
 
 	for_each_sched_entity(se) {
 		cfs_rq = cfs_rq_of(se);
@@ -6427,7 +6410,7 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
 	struct task_struct *p;
-	int new_tasks, new_prio;
+	int new_tasks;
 
 again:
 	if (!sched_fair_runnable(rq))
@@ -6523,6 +6506,13 @@ simple:
 	p = task_of(se);
 
 done: __maybe_unused;
+
+	if (p->static_prio > p->original_prio) {
+		p->static_prio = p->static_prio - 1;
+		p->prio = p->normal_prio = p->static_prio;
+		reweight_task(p, p->static_prio - MAX_RT_PRIO);
+	}
+
 #ifdef CONFIG_SMP
 	/*
 	 * Move the next running task to the front of
@@ -10064,7 +10054,7 @@ void trigger_load_balance(struct rq *rq)
 	if (time_after_eq(jiffies, rq->next_balance))
 		raise_softirq(SCHED_SOFTIRQ);
 
-	nohz_balancer_kick(rq);
+	//nohz_balancer_kick(rq);
 }
 
 static void rq_online_fair(struct rq *rq)
