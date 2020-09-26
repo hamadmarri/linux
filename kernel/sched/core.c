@@ -2923,7 +2923,12 @@ int sched_fork(unsigned long clone_flags, struct task_struct *p)
 	/*
 	 * Make sure we do not leak PI boosting priority to the child.
 	 */
+#ifdef CONFIG_CACHY_SCHED
+	p->prio = current->original_prio;
+	p->original_prio = current->original_prio;
+#else
 	p->prio = current->normal_prio;
+#endif
 
 	uclamp_fork(p);
 
@@ -3020,6 +3025,14 @@ void wake_up_new_task(struct task_struct *p)
 
 	raw_spin_lock_irqsave(&p->pi_lock, rf.flags);
 	p->state = TASK_RUNNING;
+
+#ifdef CONFIG_CACHY_SCHED
+	if (p->pid > 1 && p->original_prio >= 120) {
+		p->prio = p->static_prio = p->normal_prio = 139;
+		set_load_weight(p, true);
+	}
+#endif
+
 #ifdef CONFIG_SMP
 	/*
 	 * Fork balancing, do it here and not earlier because:
