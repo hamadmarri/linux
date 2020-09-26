@@ -833,6 +833,16 @@ config CACHY_SCHED
 
 	  If unsure, say Y here.
 
+config CACHY_MODE
+	int "Cachy Mode"
+	depends on CACHY_SCHED
+	default 1
+	help
+	  1: High performance and throughput
+	  2: Extreme responsiveness and interactivity
+
+	  If unsure, select 1.
+
 #
 # For architectures that want to enable the support for NUMA-affine scheduler
 # balancing logic:

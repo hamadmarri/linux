@@ -43,6 +43,7 @@ unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 int hrrn_max_lifetime					= 20000;	// in ms
+int cachy_mode						= CONFIG_CACHY_MODE;
 
 /*
  * The initial- and re-scaling of tunables is configurable
@@ -6296,7 +6297,10 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	if (rq->nr_running)
 		return 1;
 
-	return 0;
+	if (cachy_mode == 1)
+		return newidle_balance(rq, rf) != 0;
+	else
+		return 0;
 }
 #endif /* CONFIG_SMP */
 
@@ -10054,7 +10058,7 @@ void trigger_load_balance(struct rq *rq)
 	if (time_after_eq(jiffies, rq->next_balance))
 		raise_softirq(SCHED_SOFTIRQ);
 
-	//nohz_balancer_kick(rq);
+	nohz_balancer_kick(rq);
 }
 
 static void rq_online_fair(struct rq *rq)

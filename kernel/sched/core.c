@@ -3693,6 +3693,11 @@ static void __balance_callback(struct rq *rq)
 
 static inline void balance_callback(struct rq *rq)
 {
+#if CONFIG_CACHY_MODE
+	// 3: Extreme responsiveness and interactivity
+	if (cachy_mode == 2)
+		return;
+#endif
 	if (unlikely(rq->balance_callback))
 		__balance_callback(rq);
 }
@@ -4019,6 +4024,12 @@ void scheduler_tick(void)
 
 #if CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
+
+#if CONFIG_CACHY_MODE
+	// 3: Extreme responsiveness and interactivity
+	if (cachy_mode == 2)
+		return;
+#endif
 	trigger_load_balance(rq);
 #endif
 }
