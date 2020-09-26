@@ -4170,6 +4170,8 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	update_cfs_group(se);
 }
 
+static struct sched_entity *pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
+
 /*
  * Preempt the current task with a newly woken task if needed:
  */
