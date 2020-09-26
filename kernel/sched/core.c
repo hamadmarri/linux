@@ -3695,7 +3695,7 @@ void scheduler_tick(void)
 
 	perf_event_task_tick();
 
-#if CONFIG_SMP
+#ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq);
 #endif
