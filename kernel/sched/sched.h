@@ -506,6 +506,9 @@ struct cfs_rq {
 	 * 'curr' points to currently running entity on this cfs_rq.
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
+#ifdef CONFIG_CACHY_SCHED
+	struct sched_entity	*head;
+#endif
 	struct sched_entity	*curr;
 	struct sched_entity	*next;
 	struct sched_entity	*last;
