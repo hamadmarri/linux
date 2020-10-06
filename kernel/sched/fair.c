@@ -882,7 +882,7 @@ static u64 sched_vslice(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	return calc_delta_fair(sched_slice(cfs_rq, se), se);
 }
-#endif
+#endif /* CONFIG_CACHY_SCHED */
 
 #include "pelt.h"
 #ifdef CONFIG_SMP
@@ -4436,6 +4436,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 	if (cfs_rq->nr_running == 1)
 		check_enqueue_throttle(cfs_rq);
 }
+#endif /* CONFIG_CACHY_SCHED */
 
 static void __clear_buddies_last(struct sched_entity *se)
 {
@@ -4481,7 +4482,6 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (cfs_rq->skip == se)
 		__clear_buddies_skip(se);
 }
-#endif /* CONFIG_CACHY_SCHED */
 
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
@@ -4507,6 +4507,8 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	update_stats_dequeue(cfs_rq, se, flags);
 
+	clear_buddies(cfs_rq, se);
+
 	if (se != cfs_rq->curr)
 		__dequeue_entity(cfs_rq, se);
 	se->on_rq = 0;
@@ -4527,8 +4529,14 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	u64 now = rq_clock(rq_of(cfs_rq));
 
 	// does head have higher HRRN value than curr
-	if (entity_before(now, curr, cfs_rq->head) == 1)
+	if (entity_before(now, curr, cfs_rq->head) == 1) {
 		resched_curr(rq_of(cfs_rq));
+		/*
+		 * The current task ran long enough, ensure it doesn't get
+		 * re-elected due to buddy favours.
+		 */
+		clear_buddies(cfs_rq, curr);
+	}
 }
 #else
 static void
@@ -4665,11 +4673,12 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	u64 now = rq_clock(rq_of(cfs_rq));
 
 	if (unlikely(!se))
-		return curr;
+		se = curr;
 
 	if (curr && entity_before(now, se, curr) == 1)
-		return curr;
+		se = curr;
 
+	clear_buddies(cfs_rq, se);
 	return se;
 }
 #else
@@ -5829,67 +5838,6 @@ enqueue_throttle:
 	hrtick_update(rq);
 }
 
-#ifdef CONFIG_CACHY_SCHED
-/*
- * The dequeue_task method is called before nr_running is
- * decreased. We remove the task from the rbtree and
- * update the fair scheduling stats:
- */
-static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
-{
-	struct cfs_rq *cfs_rq;
-	struct sched_entity *se = &p->se;
-	int task_sleep = flags & DEQUEUE_SLEEP;
-	int idle_h_nr_running = task_has_idle_policy(p);
-	bool was_sched_idle = sched_idle_rq(rq);
-
-	for_each_sched_entity(se) {
-		cfs_rq = cfs_rq_of(se);
-		dequeue_entity(cfs_rq, se, flags);
-
-		cfs_rq->h_nr_running--;
-		cfs_rq->idle_h_nr_running -= idle_h_nr_running;
-
-		/* end evaluation on encountering a throttled cfs_rq */
-		if (cfs_rq_throttled(cfs_rq))
-			goto dequeue_throttle;
-
-		/* Don't dequeue parent if it has other entities besides us */
-		if (cfs_rq->load.weight) {
-			/* Avoid re-evaluating load for this entity: */
-			se = parent_entity(se);
-			break;
-		}
-		flags |= DEQUEUE_SLEEP;
-	}
-
-	for_each_sched_entity(se) {
-		cfs_rq = cfs_rq_of(se);
-
-		update_load_avg(cfs_rq, se, UPDATE_TG);
-		se_update_runnable(se);
-		update_cfs_group(se);
-
-		cfs_rq->h_nr_running--;
-		cfs_rq->idle_h_nr_running -= idle_h_nr_running;
-
-		/* end evaluation on encountering a throttled cfs_rq */
-		if (cfs_rq_throttled(cfs_rq))
-			goto dequeue_throttle;
-	}
-
-dequeue_throttle:
-	if (!se)
-		sub_nr_running(rq, 1);
-
-	/* balance early to pull high priority tasks */
-	if (unlikely(!was_sched_idle && sched_idle_rq(rq)))
-		rq->next_balance = jiffies;
-
-	util_est_dequeue(&rq->cfs, p, task_sleep);
-	hrtick_update(rq);
-}
-#else
 static void set_next_buddy(struct sched_entity *se);
 
 /*
@@ -5958,7 +5906,6 @@ dequeue_throttle:
 	util_est_dequeue(&rq->cfs, p, task_sleep);
 	hrtick_update(rq);
 }
-#endif /* CONFIG_CACHY_SCHED */
 
 #ifdef CONFIG_SMP
 
@@ -6746,53 +6693,7 @@ static unsigned long cpu_util_without(int cpu, struct task_struct *p)
 	return min_t(unsigned long, util, capacity_orig_of(cpu));
 }
 
-#ifdef CONFIG_CACHY_SCHED
-static int
-select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_flags)
-{
-	struct sched_domain *tmp, *sd = NULL;
-	int cpu = smp_processor_id();
-	int new_cpu = prev_cpu;
-	int want_affine = 0;
-	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
-
-	rcu_read_lock();
-	for_each_domain(cpu, tmp) {
-		/*
-		 * If both 'cpu' and 'prev_cpu' are part of this domain,
-		 * cpu is a valid SD_WAKE_AFFINE target.
-		 */
-		if (want_affine && (tmp->flags & SD_WAKE_AFFINE) &&
-		    cpumask_test_cpu(prev_cpu, sched_domain_span(tmp))) {
-			if (cpu != prev_cpu)
-				new_cpu = wake_affine(tmp, p, cpu, prev_cpu, sync);
-
-			sd = NULL; /* Prefer wake_affine over balance flags */
-			break;
-		}
-
-		if (tmp->flags & sd_flag)
-			sd = tmp;
-		else if (!want_affine)
-			break;
-	}
-
-	if (unlikely(sd)) {
-		/* Slow path */
-		new_cpu = find_idlest_cpu(sd, p, cpu, prev_cpu, sd_flag);
-	} else if (sd_flag & SD_BALANCE_WAKE) { /* XXX always ? */
-		/* Fast path */
-
-		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
-
-		if (want_affine)
-			current->recent_used_cpu = cpu;
-	}
-	rcu_read_unlock();
-
-	return new_cpu;
-}
-#else
+#if !defined(CONFIG_CACHY_SCHED)
 /*
  * Predicts what cpu_util(@cpu) would return if @p was migrated (and enqueued)
  * to @dst_cpu.
@@ -7025,6 +6926,7 @@ fail:
 
 	return -1;
 }
+#endif /* CONFIG_CACHY_SCHED */
 
 /*
  * select_task_rq_fair: Select target runqueue for the waking task in domains
@@ -7047,6 +6949,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	int want_affine = 0;
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 
+#if !defined(CONFIG_CACHY_SCHED)
 	if (sd_flag & SD_BALANCE_WAKE) {
 		record_wakee(p);
 
@@ -7059,6 +6962,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 
 		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 	}
+#endif
 
 	rcu_read_lock();
 	for_each_domain(cpu, tmp) {
@@ -7096,7 +7000,6 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 
 	return new_cpu;
 }
-#endif /* CONFIG_CACHY_SCHED */
 
 static void detach_entity_cfs_rq(struct sched_entity *se);
 
@@ -7179,57 +7082,7 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 }
 #endif /* CONFIG_SMP */
 
-#ifdef CONFIG_CACHY_SCHED
-/*
- * Preempt the current task with a newly woken task if needed:
- */
-static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_flags)
-{
-	struct task_struct *curr = rq->curr;
-	struct sched_entity *se = &curr->se, *pse = &p->se;
-	u64 now = rq_clock(rq);
-
-	if (unlikely(se == pse))
-		return;
-
-	/*
-	 * We can come here with TIF_NEED_RESCHED already set from new task
-	 * wake up path.
-	 *
-	 * Note: this also catches the edge-case of curr being in a throttled
-	 * group (e.g. via set_curr_task), since update_curr() (in the
-	 * enqueue of curr) will have resulted in resched being set.  This
-	 * prevents us from potentially nominating it as a false LAST_BUDDY
-	 * below.
-	 */
-	if (test_tsk_need_resched(curr))
-		return;
-
-	/* Idle tasks are by definition preempted by non-idle tasks. */
-	if (unlikely(task_has_idle_policy(curr)) &&
-	    likely(!task_has_idle_policy(p)))
-		goto preempt;
-
-	/*
-	 * Batch and idle tasks do not preempt non-idle tasks (their preemption
-	 * is driven by the tick):
-	 */
-	if (unlikely(p->policy != SCHED_NORMAL) || !sched_feat(WAKEUP_PREEMPTION))
-		return;
-
-	find_matching_se(&se, &pse);
-	update_curr(cfs_rq_of(se));
-	BUG_ON(!pse);
-	if (entity_before(now, se, pse) == 1) {
-		goto preempt;
-	}
-
-	return;
-
-preempt:
-	resched_curr(rq);
-}
-#else
+#if !defined(CONFIG_CACHY_SCHED)
 static unsigned long wakeup_gran(struct sched_entity *se)
 {
 	unsigned long gran = sysctl_sched_wakeup_granularity;
@@ -7278,6 +7131,7 @@ wakeup_preempt_entity(struct sched_entity *curr, struct sched_entity *se)
 
 	return 0;
 }
+#endif /* CONFIG_CACHY_SCHED */
 
 static void set_last_buddy(struct sched_entity *se)
 {
@@ -7365,7 +7219,12 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	find_matching_se(&se, &pse);
 	update_curr(cfs_rq_of(se));
 	BUG_ON(!pse);
+
+#ifdef CONFIG_CACHY_SCHED
+	if (entity_before(rq_clock(rq), se, pse) == 1) {
+#else
 	if (wakeup_preempt_entity(se, pse) == 1) {
+#endif
 		/*
 		 * Bias pick_next to pick the sched entity that is
 		 * triggering this preemption.
@@ -7394,7 +7253,6 @@ preempt:
 	if (sched_feat(LAST_BUDDY) && scale && entity_is_task(se))
 		set_last_buddy(se);
 }
-#endif /* CONFIG_CACHY_SCHED */
 
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
@@ -7559,46 +7417,6 @@ static void put_prev_task_fair(struct rq *rq, struct task_struct *prev)
 	}
 }
 
-#ifdef CONFIG_CACHY_SCHED
-static void yield_task_fair(struct rq *rq)
-{
-	struct task_struct *curr = rq->curr;
-	struct cfs_rq *cfs_rq = task_cfs_rq(curr);
-
-	/*
-	 * Are we the only task in the tree?
-	 */
-	if (unlikely(rq->nr_running == 1))
-		return;
-
-	if (curr->policy != SCHED_BATCH) {
-		update_rq_clock(rq);
-		/*
-		 * Update run-time statistics of the 'current'.
-		 */
-		update_curr(cfs_rq);
-		/*
-		 * Tell update_rq_clock() that we've just updated,
-		 * so we don't do microscopic update in schedule()
-		 * and double the fastpath cost.
-		 */
-		rq_clock_skip_update(rq);
-	}
-}
-
-static bool yield_to_task_fair(struct rq *rq, struct task_struct *p, bool preempt)
-{
-	struct sched_entity *se = &p->se;
-
-	/* throttled hierarchies are not runnable */
-	if (!se->on_rq || throttled_hierarchy(cfs_rq_of(se)))
-		return false;
-
-	yield_task_fair(rq);
-
-	return true;
-}
-#else
 /*
  * sched_yield() is very simple
  *
@@ -7650,7 +7468,6 @@ static bool yield_to_task_fair(struct rq *rq, struct task_struct *p, bool preemp
 
 	return true;
 }
-#endif /* CONFIG_CACHY_SCHED */
 
 #ifdef CONFIG_SMP
 /**************************************************
@@ -7868,8 +7685,6 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 
 	if (unlikely(task_has_idle_policy(p)))
 		return 0;
-
-#if !defined(CONFIG_CACHY_SCHED)
 	/*
 	 * Buddy candidates are cache hot:
 	 */
@@ -7877,7 +7692,6 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 			(&p->se == cfs_rq_of(&p->se)->next ||
 			 &p->se == cfs_rq_of(&p->se)->last))
 		return 1;
-#endif /* CONFIG_CACHY_SCHED */
 
 	if (sysctl_sched_migration_cost == -1)
 		return 1;
