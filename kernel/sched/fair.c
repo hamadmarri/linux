@@ -45,7 +45,7 @@ unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 #ifdef CONFIG_CACHY_SCHED
-int hrrn_max_lifetime					= 20000; // in ms
+int hrrn_max_lifetime					= 40000; // in ms
 #endif
 
 /*
@@ -583,11 +583,20 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 #ifdef CONFIG_CACHY_SCHED
 static inline void reset_lifetime(u64 now, struct sched_entity *se)
 {
-	s64 diff = (now - se->hrrn_start_time) - (hrrn_max_lifetime * 1000000ULL);
+	u64 life_time	= (now - se->hrrn_start_time);
+	u64 max_life_ns	= (hrrn_max_lifetime * 1000000ULL);
+	s64 diff	= life_time - max_life_ns;
 
 	if (diff > 0) {
-		se->hrrn_start_time = now - 2000000ULL;
-		se->vruntime = 1ULL;
+		// multiply life_time by 2 to round up
+		u64 life_time_x2	= life_time << 1; // 50 -> 100
+		u64 old_hrrn_x2		= life_time_x2 / se->vruntime;
+
+		// reset life to half max_life
+		se->hrrn_start_time = now - (max_life_ns >> 1);
+
+		// reset vruntime based on old hrrn ration
+		se->vruntime = max_life_ns / old_hrrn_x2;
 	}
 }
 
@@ -1009,7 +1018,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 #ifdef CONFIG_CACHY_SCHED
 	reset_lifetime(rq_clock(rq_of(cfs_rq)), curr);
-#else !defined(CONFIG_CACHY_SCHED)
+#else
 	update_min_vruntime(cfs_rq);
 #endif
 	if (entity_is_task(curr)) {
