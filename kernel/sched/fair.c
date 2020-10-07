@@ -45,7 +45,7 @@ unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 #ifdef CONFIG_CACHY_SCHED
-int hrrn_max_lifetime					= 40000; // in ms
+int hrrn_max_lifetime					= 30000; // in ms
 #endif
 
 /*
@@ -4460,6 +4460,7 @@ static void __clear_buddies_next(struct sched_entity *se)
 	}
 }
 
+#if !defined(CONFIG_CACHY_SCHED)
 static void __clear_buddies_skip(struct sched_entity *se)
 {
 	for_each_sched_entity(se) {
@@ -4470,6 +4471,7 @@ static void __clear_buddies_skip(struct sched_entity *se)
 		cfs_rq->skip = NULL;
 	}
 }
+#endif
 
 static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
@@ -4479,8 +4481,10 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (cfs_rq->next == se)
 		__clear_buddies_next(se);
 
+#if !defined(CONFIG_CACHY_SCHED)
 	if (cfs_rq->skip == se)
 		__clear_buddies_skip(se);
+#endif
 }
 
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
@@ -7157,11 +7161,13 @@ static void set_next_buddy(struct sched_entity *se)
 	}
 }
 
+#if !defined(CONFIG_CACHY_SCHED)
 static void set_skip_buddy(struct sched_entity *se)
 {
 	for_each_sched_entity(se)
 		cfs_rq_of(se)->skip = se;
 }
+#endif
 
 /*
  * Preempt the current task with a newly woken task if needed:
@@ -7450,7 +7456,9 @@ static void yield_task_fair(struct rq *rq)
 		rq_clock_skip_update(rq);
 	}
 
+#if !defined(CONFIG_CACHY_SCHED)
 	set_skip_buddy(se);
+#endif
 }
 
 static bool yield_to_task_fair(struct rq *rq, struct task_struct *p, bool preempt)
