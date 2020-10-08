@@ -3049,6 +3049,10 @@ void wake_up_new_task(struct task_struct *p)
 	update_rq_clock(rq);
 	post_init_entity_util_avg(p);
 
+#ifdef CONFIG_CACHY_SCHED
+	p->se.hrrn_start_time = rq_clock(rq);
+#endif
+
 	activate_task(rq, p, ENQUEUE_NOCLOCK);
 	trace_sched_wakeup_new(p);
 	check_preempt_curr(rq, p, WF_FORK);
@@ -6650,6 +6654,10 @@ void __init sched_init(void)
 {
 	unsigned long ptr = 0;
 	int i;
+
+#ifdef CONFIG_CACHY_SCHED
+	printk(KERN_INFO "Cachy CPU scheduler v5.4-r7 by Hamad Al Marri.");
+#endif
 
 	wait_bit_init();
 
