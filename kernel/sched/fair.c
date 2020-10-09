@@ -579,10 +579,14 @@ static inline void reset_lifetime(u64 now, struct sched_entity *se)
 	if (diff > 0) {
 		// multiply life_time by 2 to round up
 		u64 life_time_x2	= life_time << 1; // 50 -> 100
-		u64 old_hrrn_x2		= life_time_x2 / se->vruntime;
+		u64 old_hrrn_x2		= life_time_x2 / (se->vruntime + 1);
 
 		// reset life to half max_life
 		se->hrrn_start_time = now - (max_life_ns >> 1);
+
+		// avoid division by zero
+		if (old_hrrn_x2 == 0)
+			old_hrrn_x2++;
 
 		// reset vruntime based on old hrrn ration
 		se->vruntime = max_life_ns / old_hrrn_x2;
