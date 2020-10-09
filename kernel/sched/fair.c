@@ -4397,7 +4397,7 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 
 #ifdef CONFIG_CACHY_SCHED
-+static struct sched_entity *
+static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct sched_entity *se = cfs_rq->head;
@@ -6444,6 +6444,7 @@ static unsigned long cpu_util_without(int cpu, struct task_struct *p)
 	return min_t(unsigned long, util, capacity_orig_of(cpu));
 }
 
+#if !defined(CONFIG_CACHY_SCHED)
 /*
  * Disable WAKE_AFFINE in the case where task @p doesn't fit in the
  * capacity of either the waking CPU @cpu or the previous CPU @prev_cpu.
@@ -6471,7 +6472,6 @@ static int wake_cap(struct task_struct *p, int cpu, int prev_cpu)
 	return !task_fits_capacity(p, min_cap);
 }
 
-#if !defined(CONFIG_CACHY_SCHED)
 /*
  * Predicts what cpu_util(@cpu) would return if @p was migrated (and enqueued)
  * to @dst_cpu.
@@ -10273,7 +10273,11 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
+#ifdef CONFIG_CACHY_SCHED
+	struct sched_entity *curr;
+#else
 	struct sched_entity *se = &p->se, *curr;
+#endif
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
 
