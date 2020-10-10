@@ -47,6 +47,8 @@ static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 #ifdef CONFIG_CACHY_SCHED
 int hrrn_max_lifetime					= 30000; // in ms
 int cachy_timeslice					= 8;	 // in ms
+
+#define U64_TO_U32(X) ((u32) (((X) >> 8) & 0x000000007FFFFFFF))
 #endif
 
 /*
@@ -590,13 +592,14 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 static int
 entity_before(u64 now, struct sched_entity *curr, struct sched_entity *se)
 {
-	u64 r_curr, r_se, l_curr, l_se;
-	u64 vr_curr	= curr->vruntime + 1;
-	u64 vr_se	= se->vruntime + 1;
-	s64 diff;
+	u32 l_curr, l_se, r_curr, r_se, vr_curr, vr_se;
+	s32 diff;
 
-	l_curr	= now - curr->hrrn_start_time;
-	l_se	= now - se->hrrn_start_time;
+	vr_curr	= U64_TO_U32(curr->vruntime) + 1;
+	vr_se	= U64_TO_U32(se->vruntime) + 1;
+
+	l_curr	= U64_TO_U32(now - curr->hrrn_start_time);
+	l_se	= U64_TO_U32(now - se->hrrn_start_time);
 
 	r_curr	= l_curr / vr_curr;
 	r_se	= l_se / vr_se;
@@ -971,17 +974,18 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
 #ifdef CONFIG_CACHY_SCHED
 static void reset_lifetime(u64 now, struct sched_entity *se)
 {
-	u64 life_time	= (now - se->hrrn_start_time);
-	u64 max_life_ns	= (hrrn_max_lifetime * 1000000ULL);
-	s64 diff	= life_time - max_life_ns;
+	u32 life_time	= U64_TO_U32(now - se->hrrn_start_time);
+	u32 max_life_ns	= U64_TO_U32(hrrn_max_lifetime * 1000000ULL);
+
+	s32 diff	= life_time - max_life_ns;
 
 	if (unlikely(diff > 0)) {
 		// multiply life_time by 2 to round up
-		u64 life_time_x2	= life_time << 1; // 50 -> 100
-		u64 old_hrrn_x2		= life_time_x2 / (se->vruntime + 1);
+		u32 life_time_x2	= life_time << 1; // 50 -> 100
+		u32 old_hrrn_x2		= life_time_x2 / (U64_TO_U32(se->vruntime) + 1);
 
 		// reset life to half max_life
-		se->hrrn_start_time = now - (max_life_ns >> 1);
+		se->hrrn_start_time = now - ((hrrn_max_lifetime * 1000000ULL) >> 1);
 
 		// avoid division by zero
 		if (old_hrrn_x2 == 0)
