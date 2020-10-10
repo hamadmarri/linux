@@ -518,13 +518,14 @@ struct cfs_rq {
 	 * 'curr' points to currently running entity on this cfs_rq.
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
+	struct sched_entity	*curr;
 #ifdef CONFIG_CACHY_SCHED
 	struct sched_entity	*head;
-#endif
-	struct sched_entity	*curr;
+#else
 	struct sched_entity	*next;
 	struct sched_entity	*last;
 	struct sched_entity	*skip;
+#endif // CONFIG_CACHY_SCHED
 
 #ifdef	CONFIG_SCHED_DEBUG
 	unsigned int		nr_spread_over;
