@@ -664,21 +664,21 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			prev->next	= se;
 			se->prev	= prev;
 		}
-		// else if iter == head, insert se at head
-		else if (iter == cfs_rq->head) {
-			se->next		= cfs_rq->head;
-			cfs_rq->head->prev	= se;
-
-			// lastly reset the head
-			cfs_rq->head = se;
-		}
-		// else, insert se before iter
-		else {
+		// else if iter != head, insert se before iter
+		else if (iter != cfs_rq->head) {
 			se->next	= iter;
 			se->prev	= prev;
 
 			iter->prev	= se;
 			prev->next	= se;
+		}
+		// else, insert se at head
+		else {
+			se->next		= cfs_rq->head;
+			cfs_rq->head->prev	= se;
+
+			// lastly reset the head
+			cfs_rq->head = se;
 		}
 
 		return;
