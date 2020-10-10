@@ -46,6 +46,7 @@ static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 #ifdef CONFIG_CACHY_SCHED
 int hrrn_max_lifetime					= 30000; // in ms
+int cachy_timeslice					= 8;	 // in ms
 #endif
 
 /*
@@ -641,23 +642,22 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 			prev->next	= se;
 			se->prev	= prev;
 		}
-		// else if iter == head, insert se at head
-		else if (iter == cfs_rq->head) {
-			se->next		= cfs_rq->head;
-			cfs_rq->head->prev	= se;
-
-			// lastly reset the head
-			cfs_rq->head = se;
-		}
-		// else, insert se before iter
-		else {
+		// else if not head, insert se before iter
+		else if (iter != cfs_rq->head) {
 			se->next	= iter;
 			se->prev	= prev;
 
 			iter->prev	= se;
 			prev->next	= se;
 		}
+		// else iter == head, insert se at head
+		else {
+			se->next		= cfs_rq->head;
+			cfs_rq->head->prev	= se;
 
+			// lastly reset the head
+			cfs_rq->head = se;
+		}
 		return;
 	}
 
@@ -4522,10 +4522,10 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 #ifdef CONFIG_CACHY_SCHED
 
 static inline int
-finished_time_slice(struct cfs_rq *cfs_rq, struct sched_entity *curr)
+finished_timeslice(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	unsigned long ideal_runtime, delta_exec;
-	ideal_runtime = 8000000;
+	ideal_runtime =  ((unsigned long) cachy_timeslice) * 1000000UL;
 	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
 
 	if (delta_exec < ideal_runtime)
@@ -4542,7 +4542,7 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	u64 now = rq_clock(rq_of(cfs_rq));
 
-	if (!finished_time_slice(cfs_rq, curr))
+	if (!finished_timeslice(cfs_rq, curr))
 		return;
 
 	// does head have higher HRRN value than curr
@@ -4753,6 +4753,7 @@ entity_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr, int queued)
 		resched_curr(rq_of(cfs_rq));
 		return;
 	}
+
 	/*
 	 * don't let the period tick interfere with the hrtick preemption
 	 */
