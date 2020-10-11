@@ -974,25 +974,17 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
 #ifdef CONFIG_CACHY_SCHED
 static void reset_lifetime(u64 now, struct sched_entity *se)
 {
-	u32 life_time	= U64_TO_U32(now - se->hrrn_start_time);
-	u32 max_life_ns	= U64_TO_U32(hrrn_max_lifetime * 1000000ULL);
+	u64 life_time	= now - se->hrrn_start_time;
+	u64 max_life_ns	= hrrn_max_lifetime * 1000000ULL;
 
-	s32 diff	= life_time - max_life_ns;
+	s64 diff	= life_time - max_life_ns;
 
 	if (unlikely(diff > 0)) {
-		// multiply life_time by 2 to round up
-		u32 life_time_x2	= life_time << 1; // 50 -> 100
-		u32 old_hrrn_x2		= life_time_x2 / (U64_TO_U32(se->vruntime) + 1);
-
 		// reset life to half max_life
-		se->hrrn_start_time = now - ((hrrn_max_lifetime * 1000000ULL) >> 1);
+		se->hrrn_start_time = now - (max_life_ns >> 1);
 
-		// avoid division by zero
-		if (old_hrrn_x2 == 0)
-			old_hrrn_x2++;
-
-		// reset vruntime based on old hrrn ration
-		se->vruntime = max_life_ns / old_hrrn_x2;
+		// reset vruntime to half
+		se->vruntime >>= 1;
 	}
 }
 #endif /* CONFIG_CACHY_SCHED */
