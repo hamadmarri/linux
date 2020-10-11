@@ -48,7 +48,7 @@ static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 int hrrn_max_lifetime					= 30000; // in ms
 int cachy_timeslice					= 8;	 // in ms
 
-#define U64_TO_U32(X) ((u32) (((X) >> 8) & 0x000000007FFFFFFF))
+#define U64_TO_U32(X) ((u32) (((X) >> 8) & 0xFFFFFFFF))
 #endif
 
 /*
@@ -4516,20 +4516,6 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 }
 
 #ifdef CONFIG_CACHY_SCHED
-
-static inline int
-finished_timeslice(struct cfs_rq *cfs_rq, struct sched_entity *curr)
-{
-	unsigned long ideal_runtime, delta_exec;
-	ideal_runtime =  ((unsigned long) cachy_timeslice) * 1000000UL;
-	delta_exec = curr->sum_exec_runtime - curr->prev_sum_exec_runtime;
-
-	if (delta_exec < ideal_runtime)
-		return 0;
-
-	return 1;
-}
-
 /*
  * Preempt the current task with a newly woken task if needed:
  */
@@ -4537,9 +4523,6 @@ static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	u64 now = rq_clock(rq_of(cfs_rq));
-
-	if (!finished_timeslice(cfs_rq, curr))
-		return;
 
 	// does head have higher HRRN value than curr
 	if (entity_before(now, curr, cfs_rq->head) == 1)
