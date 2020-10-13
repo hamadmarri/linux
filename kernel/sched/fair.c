@@ -983,23 +983,22 @@ static void reset_lifetime(u64 now, struct sched_entity *se)
 	 * we don't need the precision of life time
 	 * Ex. for 30s, with left shift (20bits) == 31.457s
 	 */
-	u64 max_life_ns	= hrrn_max_lifetime << 20;
+	u64 max_life_ns	= ((u64) hrrn_max_lifetime) << 20;
 	u64 life_time	= now - se->hrrn_start_time;
 	s64 diff	= life_time - max_life_ns;
 
 	if (unlikely(diff > 0)) {
-		// multiply life_time by 2 to round up
-		u32 life_time_x2	= U64_TO_U32(life_time << 1); // 30s -> 60s
-		u32 old_hrrn_x2		= life_time_x2 / (U64_TO_U32(se->vruntime) | 1);
+		// multiply life_time by 8 for more precision
+		u64 old_hrrn_x8	= life_time / ((se->vruntime >> 3) | 1);
 
-		// reset life to half max_life
+		// reset life to half max_life (i.e ~15s)
 		se->hrrn_start_time = now - (max_life_ns >> 1);
 
 		// avoid division by zero
-		if (old_hrrn_x2 == 0) old_hrrn_x2 = 1;
+		if (old_hrrn_x8 == 0) old_hrrn_x8 = 1;
 
 		// reset vruntime based on old hrrn ration
-		se->vruntime = U64_TO_U32(max_life_ns) / old_hrrn_x2;
+		se->vruntime = (max_life_ns << 2) / old_hrrn_x8;
 	}
 }
 #endif /* CONFIG_CACHY_SCHED */
