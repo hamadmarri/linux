@@ -3354,6 +3354,10 @@ void wake_up_new_task(struct task_struct *p)
 	update_rq_clock(rq);
 	post_init_entity_util_avg(p);
 
+#ifdef CONFIG_CACHY_SCHED
+	p->se.hrrn_start_time = rq_clock(rq);
+#endif
+
 	activate_task(rq, p, ENQUEUE_NOCLOCK);
 	trace_sched_wakeup_new(p);
 	check_preempt_curr(rq, p, WF_FORK);
@@ -3655,7 +3659,7 @@ static struct rq *finish_task_switch(struct task_struct *prev)
 	return rq;
 }
 
-#if defined(CONFIG_SMP) && !defined(CONFIG_CACHY_SCHED)
+#ifdef CONFIG_SMP
 
 /* rq->lock is NOT held, but preemption is disabled */
 static void __balance_callback(struct rq *rq)
@@ -4004,9 +4008,7 @@ void scheduler_tick(void)
 
 	perf_event_task_tick();
 
-#if defined(CONFIG_SMP) && defined(CONFIG_CACHY_SCHED)
-	rq->idle_balance = idle_cpu(cpu);
-#elif CONFIG_SMP
+#ifdef CONFIG_SMP
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq);
 #endif
@@ -7071,7 +7073,7 @@ void __init sched_init(void)
 #endif
 
 #ifdef CONFIG_CACHY_SCHED
-	printk(KERN_INFO "Cachy CPU scheduler v5.9-r3 by Hamad Al Marri.");
+	printk(KERN_INFO "Cachy CPU scheduler v5.9-r8 by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();
