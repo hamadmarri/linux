@@ -4631,8 +4631,7 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 
 	if (unlikely(!se))
 		se = curr;
-
-	if (unlikely(curr && entity_before(now, se, curr) == 1))
+	else if (unlikely(curr && entity_before(now, se, curr) == 1))
 		se = curr;
 
 	return se;
