@@ -46,8 +46,7 @@ static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 #ifdef CONFIG_CACHY_SCHED
 int hrrn_max_lifetime					= 30000; // in ms
-int cachy_timeslice					= 8;	 // in ms
-
+int cachy_harsh_mode					= 0;
 #define U64_TO_U32(X) ((u32) (((X) >> 8) & 0xFFFFFFFF))
 #endif
 
@@ -4251,10 +4250,9 @@ static inline void update_misfit_status(struct task_struct *p, struct rq *rq) {}
 
 #endif /* CONFIG_SMP */
 
-#if !defined(CONFIG_CACHY_SCHED)
 static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-#ifdef CONFIG_SCHED_DEBUG
+#if defined(CONFIG_SCHED_DEBUG) && !defined(CONFIG_CACHY_SCHED)
 	s64 d = se->vruntime - cfs_rq->min_vruntime;
 
 	if (d < 0)
@@ -4265,6 +4263,7 @@ static void check_spread(struct cfs_rq *cfs_rq, struct sched_entity *se)
 #endif
 }
 
+#if !defined(CONFIG_CACHY_SCHED)
 static void
 place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 {
@@ -4401,10 +4400,7 @@ enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 
 	check_schedstat_required();
 	update_stats_enqueue(cfs_rq, se, flags);
-
-#if !defined(CONFIG_CACHY_SCHED)
 	check_spread(cfs_rq, se);
-#endif
 
 	if (!curr)
 		__enqueue_entity(cfs_rq, se);
@@ -4626,8 +4622,7 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 
 	if (unlikely(!se))
 		se = curr;
-
-	if (curr && entity_before(now, se, curr) == 1)
+	else if (unlikely(curr && entity_before(now, se, curr) == 1))
 		se = curr;
 
 	return se;
@@ -4708,10 +4703,7 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 
 	/* throttle cfs_rqs exceeding runtime */
 	check_cfs_rq_runtime(cfs_rq);
-
-#if !defined(CONFIG_CACHY_SCHED)
 	check_spread(cfs_rq, prev);
-#endif
 
 	if (prev->on_rq) {
 		update_stats_wait_start(cfs_rq, prev);
@@ -7135,7 +7127,6 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(se == pse))
 		return;
 
-#if !defined(CONFIG_CACHY_SCHED)
 	/*
 	 * This is possible from callers such as attach_tasks(), in which we
 	 * unconditionally check_prempt_curr() after an enqueue (which may have
@@ -7145,6 +7136,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	if (unlikely(throttled_hierarchy(cfs_rq_of(pse))))
 		return;
 
+#if !defined(CONFIG_CACHY_SCHED)
 	if (sched_feat(NEXT_BUDDY) && scale && !(wake_flags & WF_FORK)) {
 		set_next_buddy(pse);
 		next_buddy_marked = 1;
@@ -10950,12 +10942,7 @@ static void task_fork_fair(struct task_struct *p)
 static void task_fork_fair(struct task_struct *p)
 {
 	struct cfs_rq *cfs_rq;
-#ifdef CONFIG_CACHY_SCHED
-	struct sched_entity *curr;
-#else
 	struct sched_entity *se = &p->se, *curr;
-#endif /* CONFIG_CACHY_SCHED */
-
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
 
@@ -10965,10 +10952,6 @@ static void task_fork_fair(struct task_struct *p)
 	cfs_rq = task_cfs_rq(current);
 	curr = cfs_rq->curr;
 
-#ifdef CONFIG_CACHY_SCHED
-	if (curr)
-		update_curr(cfs_rq);
-#else
 	if (curr) {
 		update_curr(cfs_rq);
 		se->vruntime = curr->vruntime;
@@ -10985,8 +10968,6 @@ static void task_fork_fair(struct task_struct *p)
 	}
 
 	se->vruntime -= cfs_rq->min_vruntime;
-#endif /* CONFIG_CACHY_SCHED */
-
 	rq_unlock(rq, &rf);
 }
 #endif /* CONFIG_CACHY_SCHED */
@@ -11122,10 +11103,13 @@ static void detach_task_cfs_rq(struct task_struct *p)
 static void attach_task_cfs_rq(struct task_struct *p)
 {
 	struct sched_entity *se = &p->se;
+
 #if !defined(CONFIG_CACHY_SCHED)
 	struct cfs_rq *cfs_rq = cfs_rq_of(se);
 #endif
+
 	attach_entity_cfs_rq(se);
+
 #if !defined(CONFIG_CACHY_SCHED)
 	if (!vruntime_normalized(p))
 		se->vruntime += cfs_rq->min_vruntime;
