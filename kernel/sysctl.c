@@ -1669,8 +1669,8 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 	{
-		.procname	= "sched_cachy_timeslice_ms",
-		.data		= &cachy_timeslice,
+		.procname	= "sched_cachy_harsh_mode_enabled",
+		.data		= &cachy_harsh_mode,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
