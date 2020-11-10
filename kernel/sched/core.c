@@ -7074,7 +7074,7 @@ void __init sched_init(void)
 #endif
 
 #ifdef CONFIG_CACHY_SCHED
-	printk(KERN_INFO "Cachy CPU scheduler v5.9-r8 by Hamad Al Marri.");
+	printk(KERN_INFO "Cachy CPU scheduler v5.9-r8-rdb by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();
