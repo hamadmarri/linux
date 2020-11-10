@@ -673,7 +673,10 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	// if only one se in rq
 	if (cfs_rq->head->next == NULL)
+	{
 		cfs_rq->head = NULL;
+		WRITE_ONCE(cfs_rq->hrrn_head, 0UL);
+	}
 	else if (se == cfs_rq->head)
 	{
 		// if it is the head
@@ -4694,6 +4697,10 @@ find_max_hrrn_rq(struct cfs_rq *cfs_rq, int dst_cpu)
 			continue;
 
 		tmp_rq = cpu_rq(cpu);
+
+		if (!tmp_rq->cfs.head || tmp_rq->cfs.nr_running < 2)
+			continue;
+
 		local_hrrn = READ_ONCE(tmp_rq->cfs.hrrn_head);
 
 		if (local_hrrn > max_hrrn) {
@@ -4733,9 +4740,8 @@ static int try_pull_from(struct rq *src_rq, struct rq *this_rq, struct rq_flags 
 static int
 try_pull_higher_HRRN(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
 {
-	struct rq *this_rq = rq_of(cfs_rq), *src_rq, *max_rq;
+	struct rq *this_rq = rq_of(cfs_rq), *max_rq;
 	int dst_cpu = cpu_of(this_rq);
-	int src_cpu;
 	int pulled = 0;
 
 	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
