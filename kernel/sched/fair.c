@@ -4678,6 +4678,7 @@ static void pull_from_unlock(struct rq *this_rq,
 	rcu_read_unlock();
 
 	raw_spin_lock(&this_rq->lock);
+	update_rq_clock(this_rq);
 
 	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
 }
@@ -4758,6 +4759,7 @@ try_pull_higher_HRRN(struct cfs_rq *cfs_rq)
 	rcu_read_unlock();
 
 	raw_spin_lock(&this_rq->lock);
+	update_rq_clock(this_rq);
 
 out:
 	return pulled;
@@ -4815,6 +4817,7 @@ next:
 	rcu_read_unlock();
 
 	raw_spin_lock(&this_rq->lock);
+	update_rq_clock(this_rq);
 
 out:
 	return pulled;
@@ -11096,28 +11099,28 @@ unlock:
  */
 void trigger_load_balance(struct rq *rq)
 {
-	//int pulled = 0;
-	////unsigned long interval = 4UL;
+	int pulled = 0;
+	//unsigned long interval = 4UL;
 
-	///* Don't need to rebalance while attached to NULL domain */
-	////if (unlikely(on_null_domain(rq)))
-		////return;
+	/* Don't need to rebalance while attached to NULL domain */
+	//if (unlikely(on_null_domain(rq)))
+		//return;
 
-	//if (rq->idle_balance) {
-		////if (time_after_eq(jiffies, rq->next_pull)) {
-			////raw_spin_lock(&max_HRRN_list);
-			////pulled = try_pull_max_HRRN(&rq->cfs);
+	if (rq->idle_balance) {
+		//if (time_after_eq(jiffies, rq->next_pull)) {
+			//raw_spin_lock(&max_HRRN_list);
+			//pulled = try_pull_max_HRRN(&rq->cfs);
 
-			/////* scale ms to jiffies */
-			////interval = msecs_to_jiffies(interval);
-			////rq->next_pull = jiffies + interval;
-		////}
+			///* scale ms to jiffies */
+			//interval = msecs_to_jiffies(interval);
+			//rq->next_pull = jiffies + interval;
+		//}
 
-		//pulled = idle_try_pull_any(&rq->cfs);
+		pulled = idle_try_pull_any(&rq->cfs);
 
-		//if (pulled)
-			//resched_curr(rq);
-	//}
+		if (pulled)
+			resched_curr(rq);
+	}
 }
 
 static void rq_online_fair(struct rq *rq)
