@@ -540,6 +540,7 @@ struct cfs_rq {
 	struct sched_entity	*curr;
 #ifdef CONFIG_CACHY_SCHED
 	struct sched_entity	*head;
+	u32			hrrn_head;
 #else
 	struct sched_entity	*next;
 	struct sched_entity	*last;

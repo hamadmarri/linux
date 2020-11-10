@@ -4660,83 +4660,6 @@ cachy_can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
 	return 1;
 }
 
-static void pull_from_unlock_no_repin(struct rq *this_rq,
-			     struct rq *src_rq,
-			     struct rq_flags *rf,
-			     struct task_struct *p,
-			     int dst_cpu,
-			     struct rq_flags *this_rf)
-{
-	// detach task
-	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
-	set_task_cpu(p, dst_cpu);
-	rq_unlock(src_rq, rf);
-	local_irq_restore(rf->flags);
-
-	rcu_read_unlock();
-
-	raw_spin_lock(&this_rq->lock);
-	update_rq_clock(this_rq);
-
-	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
-}
-
-static int try_pull_higher_HRRN(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
-{
-	struct task_struct *p = NULL;
-	struct rq *this_rq = rq_of(cfs_rq), *src_rq;
-	int dst_cpu = cpu_of(this_rq);
-	int src_cpu;
-	struct rq_flags rf;
-	int pulled = 0;
-	u64 now = rq_clock(this_rq);
-	u32 head_hrrn = hrrn_of(now, cfs_rq->head);
-
-	raw_spin_unlock(&this_rq->lock);
-
-	rcu_read_lock();
-
-	for_each_online_cpu(src_cpu) {
-
-		if (src_cpu == dst_cpu)
-			continue;
-
-		src_rq = cpu_rq(src_cpu);
-
-		if (!src_rq->cfs.head || src_rq->cfs.nr_running < 2)
-			continue;
-
-		rq_lock_irqsave(src_rq, &rf);
-		update_rq_clock(src_rq);
-
-		if (!src_rq->cfs.head || src_rq->cfs.nr_running < 2)
-			goto next;
-
-		p = task_of(src_rq->cfs.head);
-
-		if (cachy_can_migrate_task(p, dst_cpu, src_rq) &&
-		    hrrn_of(now, &p->se) > head_hrrn)
-		{
-			pull_from_unlock_no_repin(this_rq, src_rq, &rf, p, dst_cpu, this_rf);
-
-			pulled = 1;
-			goto out;
-		}
-
-next:
-		rq_unlock(src_rq, &rf);
-		local_irq_restore(rf.flags);
-	}
-
-	rcu_read_unlock();
-
-	raw_spin_lock(&this_rq->lock);
-	update_rq_clock(this_rq);
-
-out:
-	return pulled;
-}
-
 static void pull_from_unlock(struct rq *this_rq,
 			     struct rq *src_rq,
 			     struct rq_flags *rf,
@@ -4753,25 +4676,110 @@ static void pull_from_unlock(struct rq *this_rq,
 	rcu_read_unlock();
 
 	raw_spin_lock(&this_rq->lock);
-	rq_repin_lock(this_rq, this_rf);
 
 	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
+}
+
+static inline struct rq *
+find_max_hrrn_rq(struct cfs_rq *cfs_rq, int dst_cpu)
+{
+	struct rq *tmp_rq, *max_rq = NULL;
+	int cpu;
+	u32 max_hrrn = cfs_rq->hrrn_head;
+	u32 local_hrrn;
+
+	// find max hrrn
+	for_each_online_cpu(cpu) {
+		if (cpu == dst_cpu)
+			continue;
+
+		tmp_rq = cpu_rq(cpu);
+		local_hrrn = READ_ONCE(tmp_rq->cfs.hrrn_head);
+
+		if (local_hrrn > max_hrrn) {
+			max_hrrn = local_hrrn;
+			max_rq = tmp_rq;
+		}
+	}
+
+	return max_rq;
+}
+
+static int try_pull_from(struct rq *src_rq, struct rq *this_rq, struct rq_flags *this_rf)
+{
+	struct rq_flags rf;
+	int dst_cpu = cpu_of(this_rq);
+	struct task_struct *p;
+
+	rq_lock_irqsave(src_rq, &rf);
+	update_rq_clock(src_rq);
+
+	if (src_rq->cfs.head && src_rq->cfs.nr_running > 1) {
+		p = task_of(src_rq->cfs.head);
+
+		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu, this_rf);
+
+			return 1;
+		}
+	}
+
+	rq_unlock(src_rq, &rf);
+	local_irq_restore(rf.flags);
+
+	return 0;
+}
+
+static int
+try_pull_higher_HRRN(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
+{
+	struct rq *this_rq = rq_of(cfs_rq), *src_rq, *max_rq;
+	int dst_cpu = cpu_of(this_rq);
+	int src_cpu;
+	int pulled = 0;
+
+	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
+
+	if (!max_rq)
+		goto out;
+
+	// unlock this_rq
+	raw_spin_unlock(&this_rq->lock);
+
+	rcu_read_lock();
+	if (try_pull_from(max_rq, this_rq, this_rf)) {
+		pulled = 1;
+		goto out;
+	}
+	rcu_read_unlock();
+
+	raw_spin_lock(&this_rq->lock);
+
+out:
+	return pulled;
 }
 
 static int
 try_pull_any(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
 {
 	struct task_struct *p = NULL;
-	struct rq *this_rq = rq_of(cfs_rq), *src_rq;
+	struct rq *this_rq = rq_of(cfs_rq), *src_rq, *max_rq;
 	int dst_cpu = cpu_of(this_rq);
 	int src_cpu;
 	struct rq_flags rf;
 	int pulled = 0;
 
-	rq_unpin_lock(this_rq, this_rf);
+	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
+
+	// unlock this_rq
 	raw_spin_unlock(&this_rq->lock);
 
 	rcu_read_lock();
+
+	if (max_rq && try_pull_from(max_rq, this_rq, this_rf)) {
+		pulled = 1;
+		goto out;
+	}
 
 	for_each_online_cpu(src_cpu) {
 
@@ -4779,9 +4787,6 @@ try_pull_any(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
 			continue;
 
 		src_rq = cpu_rq(src_cpu);
-
-		if (!src_rq->cfs.head || src_rq->cfs.nr_running < 2)
-			continue;
 
 		rq_lock_irqsave(src_rq, &rf);
 		update_rq_clock(src_rq);
@@ -4806,7 +4811,6 @@ next:
 	rcu_read_unlock();
 
 	raw_spin_lock(&this_rq->lock);
-	rq_repin_lock(this_rq, this_rf);
 
 out:
 	return pulled;
@@ -7472,6 +7476,15 @@ again:
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
+	cfs_rq = &rq->cfs;
+
+	if (cfs_rq->head) {
+		u32 hrrn = hrrn_of(rq_clock(rq), cfs_rq->head);
+		WRITE_ONCE(cfs_rq->hrrn_head, hrrn);
+	} else {
+		WRITE_ONCE(cfs_rq->hrrn_head, 0UL);
+	}
+
 	p = task_of(se);
 
 done: __maybe_unused;
@@ -7492,6 +7505,8 @@ done: __maybe_unused;
 	return p;
 
 idle:
+	WRITE_ONCE(cfs_rq->hrrn_head, 0UL);
+
 	if (!rf)
 		return NULL;
 
