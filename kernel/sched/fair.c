@@ -4667,8 +4667,7 @@ static void pull_from_unlock(struct rq *this_rq,
 			     struct rq *src_rq,
 			     struct rq_flags *rf,
 			     struct task_struct *p,
-			     int dst_cpu,
-			     struct rq_flags *this_rf)
+			     int dst_cpu)
 {
 	// detach task
 	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
@@ -4712,7 +4711,7 @@ find_max_hrrn_rq(struct cfs_rq *cfs_rq, int dst_cpu)
 	return max_rq;
 }
 
-static int try_pull_from(struct rq *src_rq, struct rq *this_rq, struct rq_flags *this_rf)
+static int try_pull_from(struct rq *src_rq, struct rq *this_rq)
 {
 	struct rq_flags rf;
 	int dst_cpu = cpu_of(this_rq);
@@ -4725,8 +4724,7 @@ static int try_pull_from(struct rq *src_rq, struct rq *this_rq, struct rq_flags 
 		p = task_of(src_rq->cfs.head);
 
 		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
-			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu, this_rf);
-
+			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
 			return 1;
 		}
 	}
@@ -4738,7 +4736,7 @@ static int try_pull_from(struct rq *src_rq, struct rq *this_rq, struct rq_flags 
 }
 
 static int
-try_pull_higher_HRRN(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
+try_pull_higher_HRRN(struct cfs_rq *cfs_rq)
 {
 	struct rq *this_rq = rq_of(cfs_rq), *max_rq;
 	int dst_cpu = cpu_of(this_rq);
@@ -4753,7 +4751,7 @@ try_pull_higher_HRRN(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
 	raw_spin_unlock(&this_rq->lock);
 
 	rcu_read_lock();
-	if (try_pull_from(max_rq, this_rq, this_rf)) {
+	if (try_pull_from(max_rq, this_rq)) {
 		pulled = 1;
 		goto out;
 	}
@@ -4766,7 +4764,7 @@ out:
 }
 
 static int
-try_pull_any(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
+try_pull_any(struct cfs_rq *cfs_rq)
 {
 	struct task_struct *p = NULL;
 	struct rq *this_rq = rq_of(cfs_rq), *src_rq, *max_rq;
@@ -4782,7 +4780,7 @@ try_pull_any(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
 
 	rcu_read_lock();
 
-	if (max_rq && try_pull_from(max_rq, this_rq, this_rf)) {
+	if (max_rq && try_pull_from(max_rq, this_rq)) {
 		pulled = 1;
 		goto out;
 	}
@@ -4803,7 +4801,7 @@ try_pull_any(struct cfs_rq *cfs_rq, struct rq_flags *this_rf)
 		p = task_of(src_rq->cfs.head);
 
 		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
-			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu, this_rf);
+			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
 
 			pulled = 1;
 			goto out;
@@ -7444,14 +7442,12 @@ preempt:
 
 #ifdef CONFIG_CACHY_SCHED
 static inline void
-global_rq_check(struct cfs_rq *cfs_rq, struct rq_flags *rf)
+global_rq_check(struct cfs_rq *cfs_rq)
 {
-	if (!cfs_rq->head) {
-		try_pull_any(cfs_rq, rf);
-	}
-	else {
-		try_pull_higher_HRRN(cfs_rq, rf);
-	}
+	if (!cfs_rq->head)
+		try_pull_any(cfs_rq);
+	else
+		try_pull_higher_HRRN(cfs_rq);
 }
 #endif
 
@@ -7471,7 +7467,7 @@ again:
 		put_prev_task(rq, prev);
 
 	if (!pulled)
-		global_rq_check(cfs_rq, rf);
+		global_rq_check(cfs_rq);
 
 	if (!cfs_rq->head)
 		goto idle;
@@ -7522,7 +7518,7 @@ idle:
 	if (!cpu_active(rq->cpu))
 		goto do_idle;
 
-	pulled = try_pull_any(&rq->cfs, rf);
+	pulled = try_pull_any(&rq->cfs);
 
 	if (rq->nr_running != rq->cfs.h_nr_running)
 		return RETRY_TASK;
@@ -11045,41 +11041,83 @@ static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
 	rebalance_domains(this_rq, idle);
 }
 
+static int
+idle_try_pull_any(struct cfs_rq *cfs_rq)
+{
+	struct task_struct *p = NULL;
+	struct rq *this_rq = rq_of(cfs_rq), *src_rq, *max_rq;
+	int dst_cpu = cpu_of(this_rq);
+	int src_cpu;
+	struct rq_flags rf;
+
+	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
+
+	rcu_read_lock();
+
+	if (max_rq && try_pull_from(max_rq, this_rq))
+		goto unlock;
+
+	for_each_online_cpu(src_cpu) {
+
+		if (src_cpu == dst_cpu)
+			continue;
+
+		src_rq = cpu_rq(src_cpu);
+
+		rq_lock_irqsave(src_rq, &rf);
+		update_rq_clock(src_rq);
+
+		if (!src_rq->cfs.head || src_rq->cfs.nr_running < 2)
+			goto next;
+
+		p = task_of(src_rq->cfs.head);
+
+		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
+			goto unlock;
+		}
+
+next:
+		rq_unlock(src_rq, &rf);
+		local_irq_restore(rf.flags);
+	}
+
+	rcu_read_unlock();
+	return 0;
+
+unlock:
+	// unlock this_rq
+	raw_spin_unlock(&this_rq->lock);
+	return 1;
+}
+
 /*
  * Trigger the SCHED_SOFTIRQ if it is time to do periodic load balancing.
  */
 void trigger_load_balance(struct rq *rq)
 {
-	int pulled = 0;
-	//unsigned long interval = 4UL;
-	struct rq_flags rf;
+	//int pulled = 0;
+	////unsigned long interval = 4UL;
 
-	/* Don't need to rebalance while attached to NULL domain */
-	//if (unlikely(on_null_domain(rq)))
-		//return;
+	///* Don't need to rebalance while attached to NULL domain */
+	////if (unlikely(on_null_domain(rq)))
+		////return;
 
-	if (rq->idle_balance) {
-		rq_lock(rq, &rf);
-		update_rq_clock(rq);
+	//if (rq->idle_balance) {
+		////if (time_after_eq(jiffies, rq->next_pull)) {
+			////raw_spin_lock(&max_HRRN_list);
+			////pulled = try_pull_max_HRRN(&rq->cfs);
 
+			/////* scale ms to jiffies */
+			////interval = msecs_to_jiffies(interval);
+			////rq->next_pull = jiffies + interval;
+		////}
 
-		//if (time_after_eq(jiffies, rq->next_pull)) {
-			//raw_spin_lock(&max_HRRN_list);
-			//pulled = try_pull_max_HRRN(&rq->cfs);
+		//pulled = idle_try_pull_any(&rq->cfs);
 
-			///* scale ms to jiffies */
-			//interval = msecs_to_jiffies(interval);
-			//rq->next_pull = jiffies + interval;
-		//}
-
-
-		pulled = try_pull_any(&rq->cfs, &rf);
-
-		if (pulled)
-			resched_curr(rq);
-
-		rq_unlock(rq, &rf);
-	}
+		//if (pulled)
+			//resched_curr(rq);
+	//}
 }
 
 static void rq_online_fair(struct rq *rq)
