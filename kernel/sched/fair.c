@@ -7257,8 +7257,7 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	if (rq->nr_running)
 		return 1;
 
-	//return newidle_balance(rq, rf) != 0;
-	return 0;
+	return try_pull_any(&rq->cfs);
 }
 #endif /* CONFIG_SMP */
 
@@ -11100,22 +11099,12 @@ unlock:
 void trigger_load_balance(struct rq *rq)
 {
 	int pulled = 0;
-	//unsigned long interval = 4UL;
 
 	/* Don't need to rebalance while attached to NULL domain */
-	//if (unlikely(on_null_domain(rq)))
-		//return;
+	if (unlikely(on_null_domain(rq)))
+		return;
 
 	if (rq->idle_balance) {
-		//if (time_after_eq(jiffies, rq->next_pull)) {
-			//raw_spin_lock(&max_HRRN_list);
-			//pulled = try_pull_max_HRRN(&rq->cfs);
-
-			///* scale ms to jiffies */
-			//interval = msecs_to_jiffies(interval);
-			//rq->next_pull = jiffies + interval;
-		//}
-
 		pulled = idle_try_pull_any(&rq->cfs);
 
 		if (pulled)
