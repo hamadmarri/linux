@@ -3356,7 +3356,7 @@ void wake_up_new_task(struct task_struct *p)
 
 #ifdef CONFIG_CACHY_SCHED
 	if (!cachy_harsh_mode)
-		p->se.hrrn_start_time = rq_clock(rq);
+		p->se.hrrn_start_time = sched_clock();
 #endif
 
 	activate_task(rq, p, ENQUEUE_NOCLOCK);

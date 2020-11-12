@@ -626,7 +626,7 @@ entity_before(u64 now, struct sched_entity *curr, struct sched_entity *se)
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
 	struct sched_entity *iter, *prev = NULL;
-	u64 now = rq_clock(rq_of(cfs_rq));
+	u64 now = sched_clock();
 	se->next = NULL;
 	se->prev = NULL;
 
@@ -1030,7 +1030,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
 
 #ifdef CONFIG_CACHY_SCHED
-	reset_lifetime(rq_clock(rq_of(cfs_rq)), curr);
+	reset_lifetime(sched_clock(), curr);
 #else
 	update_min_vruntime(cfs_rq);
 #endif
@@ -4556,7 +4556,7 @@ hrrn_of(u64 now, struct sched_entity *se)
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	u64 now	= rq_clock(rq_of(cfs_rq));
+	u64 now	= sched_clock();
 
 	if (!cfs_rq->head)
 		resched_curr(rq_of(cfs_rq));
@@ -4827,7 +4827,7 @@ static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct sched_entity *se = cfs_rq->head;
-	u64 now = rq_clock(rq_of(cfs_rq));
+	u64 now = sched_clock();
 
 	if (unlikely(!se))
 		se = curr;
@@ -7405,7 +7405,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	BUG_ON(!pse);
 
 #ifdef CONFIG_CACHY_SCHED
-	if (entity_before(rq_clock(rq), se, pse) == 1)
+	if (entity_before(sched_clock(), se, pse) == 1)
 		goto preempt;
 #else
 	if (wakeup_preempt_entity(se, pse) == 1) {
@@ -7483,7 +7483,7 @@ again:
 	cfs_rq = &rq->cfs;
 
 	if (cfs_rq->head) {
-		u32 hrrn = hrrn_of(rq_clock(rq), cfs_rq->head);
+		u32 hrrn = hrrn_of(sched_clock(), cfs_rq->head);
 		WRITE_ONCE(cfs_rq->hrrn_head, hrrn);
 	} else {
 		WRITE_ONCE(cfs_rq->hrrn_head, 0UL);
