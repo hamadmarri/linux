@@ -4558,11 +4558,8 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	u64 now	= sched_clock();
 
-	if (!cfs_rq->head)
-		resched_curr(rq_of(cfs_rq));
-
 	// does head have higher HRRN value than curr
-	else if (entity_before(now, curr, cfs_rq->head) == 1)
+	if (!cfs_rq->head || entity_before(now, curr, cfs_rq->head) == 1)
 		resched_curr(rq_of(cfs_rq));
 }
 #else
@@ -4641,188 +4638,6 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 }
 
 #ifdef CONFIG_CACHY_SCHED
-static int
-cachy_can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
-{
-	/*
-	 * We do not migrate tasks that are:
-	 * 1) throttled_lb_pair, or
-	 * 2) cannot be migrated to this CPU due to cpus_ptr, or
-	 * 3) running (obviously), or
-	 */
-
-	if (task_running(src_rq, p))
-		return 0;
-
-	if (!cpumask_test_cpu(dst_cpu, p->cpus_ptr))
-		return 0;
-
-	if (p->se.exec_start == 0)
-		return 0;
-
-	return 1;
-}
-
-static void pull_from_unlock(struct rq *this_rq,
-			     struct rq *src_rq,
-			     struct rq_flags *rf,
-			     struct task_struct *p,
-			     int dst_cpu)
-{
-	// detach task
-	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
-	set_task_cpu(p, dst_cpu);
-	rq_unlock(src_rq, rf);
-	local_irq_restore(rf->flags);
-
-	rcu_read_unlock();
-
-	raw_spin_lock(&this_rq->lock);
-	update_rq_clock(this_rq);
-
-	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
-}
-
-static inline struct rq *
-find_max_hrrn_rq(struct cfs_rq *cfs_rq, int dst_cpu)
-{
-	struct rq *tmp_rq, *max_rq = NULL;
-	int cpu;
-	u32 max_hrrn = cfs_rq->hrrn_head;
-	u32 local_hrrn;
-
-	// find max hrrn
-	for_each_online_cpu(cpu) {
-		if (cpu == dst_cpu)
-			continue;
-
-		tmp_rq = cpu_rq(cpu);
-
-		if (!tmp_rq->cfs.head || tmp_rq->cfs.nr_running < 2)
-			continue;
-
-		local_hrrn = READ_ONCE(tmp_rq->cfs.hrrn_head);
-
-		if (local_hrrn > max_hrrn) {
-			max_hrrn = local_hrrn;
-			max_rq = tmp_rq;
-		}
-	}
-
-	return max_rq;
-}
-
-static int try_pull_from(struct rq *src_rq, struct rq *this_rq)
-{
-	struct rq_flags rf;
-	int dst_cpu = cpu_of(this_rq);
-	struct task_struct *p;
-
-	rq_lock_irqsave(src_rq, &rf);
-	update_rq_clock(src_rq);
-
-	if (src_rq->cfs.head && src_rq->cfs.nr_running > 1) {
-		p = task_of(src_rq->cfs.head);
-
-		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
-			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
-			return 1;
-		}
-	}
-
-	rq_unlock(src_rq, &rf);
-	local_irq_restore(rf.flags);
-
-	return 0;
-}
-
-static int
-try_pull_higher_HRRN(struct cfs_rq *cfs_rq)
-{
-	struct rq *this_rq = rq_of(cfs_rq), *max_rq;
-	int dst_cpu = cpu_of(this_rq);
-	int pulled = 0;
-
-	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
-
-	if (!max_rq)
-		goto out;
-
-	// unlock this_rq
-	raw_spin_unlock(&this_rq->lock);
-
-	rcu_read_lock();
-	if (try_pull_from(max_rq, this_rq)) {
-		pulled = 1;
-		goto out;
-	}
-	rcu_read_unlock();
-
-	raw_spin_lock(&this_rq->lock);
-	update_rq_clock(this_rq);
-
-out:
-	return pulled;
-}
-
-static int
-try_pull_any(struct cfs_rq *cfs_rq)
-{
-	struct task_struct *p = NULL;
-	struct rq *this_rq = rq_of(cfs_rq), *src_rq, *max_rq;
-	int dst_cpu = cpu_of(this_rq);
-	int src_cpu;
-	struct rq_flags rf;
-	int pulled = 0;
-
-	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
-
-	// unlock this_rq
-	raw_spin_unlock(&this_rq->lock);
-
-	rcu_read_lock();
-
-	if (max_rq && try_pull_from(max_rq, this_rq)) {
-		pulled = 1;
-		goto out;
-	}
-
-	for_each_online_cpu(src_cpu) {
-
-		if (src_cpu == dst_cpu)
-			continue;
-
-		src_rq = cpu_rq(src_cpu);
-
-		rq_lock_irqsave(src_rq, &rf);
-		update_rq_clock(src_rq);
-
-		if (!src_rq->cfs.head || src_rq->cfs.nr_running < 2)
-			goto next;
-
-		p = task_of(src_rq->cfs.head);
-
-		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
-			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
-
-			pulled = 1;
-			goto out;
-		}
-
-next:
-		rq_unlock(src_rq, &rf);
-		local_irq_restore(rf.flags);
-	}
-
-	rcu_read_unlock();
-
-	raw_spin_lock(&this_rq->lock);
-	update_rq_clock(this_rq);
-
-out:
-	return pulled;
-}
-
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
@@ -7257,7 +7072,7 @@ balance_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
 	if (rq->nr_running)
 		return 1;
 
-	return try_pull_any(&rq->cfs);
+	return newidle_balance(rq, rf) != 0;
 }
 #endif /* CONFIG_SMP */
 
@@ -7442,16 +7257,212 @@ preempt:
 #endif /* CONFIG_CACHY_SCHED */
 }
 
-#ifdef CONFIG_CACHY_SCHED
-static inline void
-global_rq_check(struct cfs_rq *cfs_rq)
+static int
+cachy_can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
 {
-	if (!cfs_rq->head)
-		try_pull_any(cfs_rq);
-	else
-		try_pull_higher_HRRN(cfs_rq);
+	/*
+	 * We do not migrate tasks that are:
+	 * 1) throttled_lb_pair, or
+	 * 2) cannot be migrated to this CPU due to cpus_ptr, or
+	 * 3) running (obviously), or
+	 */
+
+	if (task_running(src_rq, p))
+		return 0;
+
+	if (!cpumask_test_cpu(dst_cpu, p->cpus_ptr))
+		return 0;
+
+	if (p->se.exec_start == 0)
+		return 0;
+
+	return 1;
 }
-#endif
+
+static void pull_from_unlock(struct rq *this_rq,
+			     struct rq *src_rq,
+			     struct rq_flags *rf,
+			     struct task_struct *p,
+			     int dst_cpu)
+{
+	// detach task
+	deactivate_task(src_rq, p, DEQUEUE_NOCLOCK);
+	set_task_cpu(p, dst_cpu);
+
+	// unlock src rq
+	rq_unlock(src_rq, rf);
+	local_irq_restore(rf->flags);
+
+	// lock this rq
+	raw_spin_lock(&this_rq->lock);
+	update_rq_clock(this_rq);
+
+	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
+
+	// unlock this rq
+	raw_spin_unlock(&this_rq->lock);
+}
+
+static inline struct rq *
+find_max_nr_rq(struct cfs_rq *cfs_rq, int dst_cpu)
+{
+	struct rq *tmp_rq, *max_rq = NULL;
+	int cpu;
+	unsigned int max_nr = cfs_rq->nr_running;
+	unsigned int nr;
+
+	// find max nr_running
+	for_each_online_cpu(cpu) {
+		if (cpu == dst_cpu)
+			continue;
+
+		tmp_rq = cpu_rq(cpu);
+		nr = tmp_rq->cfs.nr_running;
+
+		if (nr < 2UL || !tmp_rq->cfs.head)
+			continue;
+
+		if (nr > max_nr) {
+			max_nr = nr;
+			max_rq = tmp_rq;
+		}
+	}
+
+	return max_rq;
+}
+
+static inline struct rq *
+find_max_hrrn_rq(struct cfs_rq *cfs_rq, int dst_cpu)
+{
+	struct rq *tmp_rq, *max_rq = NULL;
+	int cpu;
+	u32 max_hrrn = cfs_rq->hrrn_head;
+	u32 local_hrrn;
+
+	// find max hrrn
+	for_each_online_cpu(cpu) {
+		if (cpu == dst_cpu)
+			continue;
+
+		tmp_rq = cpu_rq(cpu);
+
+		if (tmp_rq->cfs.nr_running < 2 || !tmp_rq->cfs.head)
+			continue;
+
+		local_hrrn = READ_ONCE(tmp_rq->cfs.hrrn_head);
+
+		if (local_hrrn > max_hrrn) {
+			max_hrrn = local_hrrn;
+			max_rq = tmp_rq;
+		}
+	}
+
+	return max_rq;
+}
+
+static int try_pull_from(struct rq *src_rq, struct rq *this_rq)
+{
+	struct rq_flags rf;
+	int dst_cpu = cpu_of(this_rq);
+	struct task_struct *p;
+
+	rq_lock_irqsave(src_rq, &rf);
+	update_rq_clock(src_rq);
+
+	if (src_rq->cfs.head && src_rq->cfs.nr_running > 1) {
+		p = task_of(src_rq->cfs.head);
+
+		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
+			return 1;
+		}
+	}
+
+	rq_unlock(src_rq, &rf);
+	local_irq_restore(rf.flags);
+
+	return 0;
+}
+
+static int
+try_pull_higher_HRRN(struct cfs_rq *cfs_rq)
+{
+	struct rq *this_rq = rq_of(cfs_rq), *max_rq;
+	int dst_cpu = cpu_of(this_rq);
+
+	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
+
+	if (!max_rq)
+		return 0;
+
+	if (try_pull_from(max_rq, this_rq))
+		return 1;
+
+	return 0;
+}
+
+static void try_pull_any(struct rq *this_rq)
+{
+	struct cfs_rq *cfs_rq = &this_rq->cfs;
+	struct task_struct *p = NULL;
+	struct rq *src_rq, *max_rq;
+	int dst_cpu = cpu_of(this_rq);
+	int src_cpu;
+	struct rq_flags src_rf;
+
+	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
+
+	rcu_read_lock();
+
+	if (max_rq &&
+	    //max_rq->cfs.nr_running > cfs_rq->nr_running + 1 &&
+	    try_pull_from(max_rq, this_rq))
+		goto out;
+
+	// try pull any task from cfs.nr_running >= 2
+	for_each_online_cpu(src_cpu) {
+
+		if (src_cpu == dst_cpu)
+			continue;
+
+		src_rq = cpu_rq(src_cpu);
+
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head))
+			goto next;
+
+		p = task_of(src_rq->cfs.head);
+
+		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &src_rf, p, dst_cpu);
+			goto out;
+		}
+
+next:
+		rq_unlock(src_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+	}
+
+out:
+	rcu_read_unlock();
+}
+
+static inline void
+active_balance(struct rq *rq)
+{
+	struct cfs_rq *cfs_rq = &rq->cfs;
+
+	raw_spin_unlock(&rq->lock);
+
+	if (!cfs_rq->head)
+		try_pull_any(rq);
+	else
+		try_pull_higher_HRRN(&rq->cfs);
+
+	raw_spin_lock(&rq->lock);
+}
 
 struct task_struct *
 pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf)
@@ -7459,7 +7470,7 @@ pick_next_task_fair(struct rq *rq, struct task_struct *prev, struct rq_flags *rf
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	struct sched_entity *se;
 	struct task_struct *p;
-	int pulled = 0;
+	int new_tasks;
 
 again:
 	if (!sched_fair_runnable(rq))
@@ -7468,8 +7479,8 @@ again:
 	if (prev)
 		put_prev_task(rq, prev);
 
-	if (!pulled)
-		global_rq_check(cfs_rq);
+	if (new_tasks == 0)
+		active_balance(rq);
 
 	if (!cfs_rq->head)
 		goto idle;
@@ -7514,21 +7525,19 @@ idle:
 	if (!rf)
 		return NULL;
 
+	new_tasks = newidle_balance(rq, rf);
+
 	/*
-	 * Do not pull tasks towards !active CPUs...
+	 * Because newidle_balance() releases (and re-acquires) rq->lock, it is
+	 * possible for any higher priority task to appear. In that case we
+	 * must re-start the pick_next_entity() loop.
 	 */
-	if (!cpu_active(rq->cpu))
-		goto do_idle;
-
-	pulled = try_pull_any(&rq->cfs);
-
-	if (rq->nr_running != rq->cfs.h_nr_running)
+	if (new_tasks < 0)
 		return RETRY_TASK;
 
-	if (pulled)
+	if (new_tasks > 0)
 		goto again;
 
-do_idle:
 	/*
 	 * rq is about to be idle, check if we need to update the
 	 * lost_idle_time of clock_pelt
@@ -10908,11 +10917,14 @@ static inline void nohz_newidle_balance(struct rq *this_rq) { }
  */
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 {
-	unsigned long next_balance = jiffies + HZ;
+	struct cfs_rq *cfs_rq = &this_rq->cfs;
 	int this_cpu = this_rq->cpu;
-	struct sched_domain *sd;
+	struct task_struct *p = NULL;
+	struct rq *src_rq, *max_rq;
+	int dst_cpu = cpu_of(this_rq);
+	int src_cpu;
+	struct rq_flags src_rf;
 	int pulled_task = 0;
-	u64 curr_cost = 0;
 
 	update_misfit_status(NULL, this_rq);
 	/*
@@ -10927,6 +10939,9 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	if (!cpu_active(this_cpu))
 		return 0;
 
+
+	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
+
 	/*
 	 * This is OK, because current is on_cpu, which avoids it being picked
 	 * for load-balance and preemption/IRQs are still disabled avoiding
@@ -10934,49 +10949,40 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	 * re-start the picking loop.
 	 */
 	rq_unpin_lock(this_rq, rf);
+	raw_spin_unlock(&this_rq->lock);
 
-	if (this_rq->avg_idle < sysctl_sched_migration_cost ||
-	    !READ_ONCE(this_rq->rd->overload)) {
+	rcu_read_lock();
 
-		rcu_read_lock();
-		sd = rcu_dereference_check_sched_domain(this_rq->sd);
-		if (sd)
-			update_next_balance(sd, &next_balance);
-		rcu_read_unlock();
-
-		nohz_newidle_balance(this_rq);
-
+	if (max_rq && try_pull_from(max_rq, this_rq)) {
+		pulled_task = 1;
 		goto out;
 	}
 
-	raw_spin_unlock(&this_rq->lock);
+	for_each_online_cpu(src_cpu) {
 
-	update_blocked_averages(this_cpu);
-	rcu_read_lock();
-	for_each_domain(this_cpu, sd) {
-		int continue_balancing = 1;
-		u64 t0, domain_cost;
+		if (src_cpu == dst_cpu)
+			continue;
 
-		if (this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost) {
-			update_next_balance(sd, &next_balance);
-			break;
+		src_rq = cpu_rq(src_cpu);
+
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head))
+			goto next;
+
+		p = task_of(src_rq->cfs.head);
+
+		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &src_rf, p, dst_cpu);
+
+			pulled_task = 1;
+			goto out;
 		}
 
-		if (sd->flags & SD_BALANCE_NEWIDLE) {
-			t0 = sched_clock_cpu(this_cpu);
-
-			pulled_task = load_balance(this_cpu, this_rq,
-						   sd, CPU_NEWLY_IDLE,
-						   &continue_balancing);
-
-			domain_cost = sched_clock_cpu(this_cpu) - t0;
-			if (domain_cost > sd->max_newidle_lb_cost)
-				sd->max_newidle_lb_cost = domain_cost;
-
-			curr_cost += domain_cost;
-		}
-
-		update_next_balance(sd, &next_balance);
+next:
+		rq_unlock(src_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
 
 		/*
 		 * Stop searching for tasks to pull if there are
@@ -10985,14 +10991,11 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 		if (pulled_task || this_rq->nr_running > 0)
 			break;
 	}
-	rcu_read_unlock();
-
-	raw_spin_lock(&this_rq->lock);
-
-	if (curr_cost > this_rq->max_idle_balance_cost)
-		this_rq->max_idle_balance_cost = curr_cost;
 
 out:
+	rcu_read_unlock();
+	raw_spin_lock(&this_rq->lock);
+
 	/*
 	 * While browsing the domains, we released the rq lock, a task could
 	 * have been enqueued in the meantime. Since we're not going idle,
@@ -11000,10 +11003,6 @@ out:
 	 */
 	if (this_rq->cfs.h_nr_running && !pulled_task)
 		pulled_task = 1;
-
-	/* Move the next balance forward */
-	if (time_after(this_rq->next_balance, next_balance))
-		this_rq->next_balance = next_balance;
 
 	/* Is there a task of a high priority class? */
 	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
@@ -11051,13 +11050,16 @@ idle_try_pull_any(struct cfs_rq *cfs_rq)
 	int dst_cpu = cpu_of(this_rq);
 	int src_cpu;
 	struct rq_flags rf;
+	int pulled = 0;
 
 	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
 
 	rcu_read_lock();
 
-	if (max_rq && try_pull_from(max_rq, this_rq))
-		goto unlock;
+	if (max_rq && try_pull_from(max_rq, this_rq)) {
+		pulled = 1;
+		goto out;
+	}
 
 	for_each_online_cpu(src_cpu) {
 
@@ -11069,14 +11071,15 @@ idle_try_pull_any(struct cfs_rq *cfs_rq)
 		rq_lock_irqsave(src_rq, &rf);
 		update_rq_clock(src_rq);
 
-		if (!src_rq->cfs.head || src_rq->cfs.nr_running < 2)
+		if (src_rq->cfs.nr_running < 2 || !src_rq->cfs.head)
 			goto next;
 
 		p = task_of(src_rq->cfs.head);
 
 		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
 			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
-			goto unlock;
+			pulled = 1;
+			goto out;
 		}
 
 next:
@@ -11084,13 +11087,9 @@ next:
 		local_irq_restore(rf.flags);
 	}
 
+out:
 	rcu_read_unlock();
-	return 0;
-
-unlock:
-	// unlock this_rq
-	raw_spin_unlock(&this_rq->lock);
-	return 1;
+	return pulled;
 }
 
 /*
@@ -11110,6 +11109,9 @@ void trigger_load_balance(struct rq *rq)
 		if (pulled)
 			resched_curr(rq);
 	}
+	//else {
+		//active_balance(rq);
+	//}
 }
 
 static void rq_online_fair(struct rq *rq)
