@@ -3235,15 +3235,15 @@ account_entity_dequeue(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static inline void
 enqueue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	cfs_rq->avg.load_avg += se->avg.load_avg;
-	cfs_rq->avg.load_sum += se_weight(se) * se->avg.load_sum;
+	//cfs_rq->avg.load_avg += se->avg.load_avg;
+	//cfs_rq->avg.load_sum += se_weight(se) * se->avg.load_sum;
 }
 
 static inline void
 dequeue_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	sub_positive(&cfs_rq->avg.load_avg, se->avg.load_avg);
-	sub_positive(&cfs_rq->avg.load_sum, se_weight(se) * se->avg.load_sum);
+	//sub_positive(&cfs_rq->avg.load_avg, se->avg.load_avg);
+	//sub_positive(&cfs_rq->avg.load_sum, se_weight(se) * se->avg.load_sum);
 }
 #else
 static inline void
@@ -3874,49 +3874,49 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
  */
 static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	/*
-	 * cfs_rq->avg.period_contrib can be used for both cfs_rq and se.
-	 * See ___update_load_avg() for details.
-	 */
-	u32 divider = get_pelt_divider(&cfs_rq->avg);
+	///*
+	 //* cfs_rq->avg.period_contrib can be used for both cfs_rq and se.
+	 //* See ___update_load_avg() for details.
+	 //*/
+	//u32 divider = get_pelt_divider(&cfs_rq->avg);
 
-	/*
-	 * When we attach the @se to the @cfs_rq, we must align the decay
-	 * window because without that, really weird and wonderful things can
-	 * happen.
-	 *
-	 * XXX illustrate
-	 */
-	se->avg.last_update_time = cfs_rq->avg.last_update_time;
-	se->avg.period_contrib = cfs_rq->avg.period_contrib;
+	///*
+	 //* When we attach the @se to the @cfs_rq, we must align the decay
+	 //* window because without that, really weird and wonderful things can
+	 //* happen.
+	 //*
+	 //* XXX illustrate
+	 //*/
+	//se->avg.last_update_time = cfs_rq->avg.last_update_time;
+	//se->avg.period_contrib = cfs_rq->avg.period_contrib;
 
-	/*
-	 * Hell(o) Nasty stuff.. we need to recompute _sum based on the new
-	 * period_contrib. This isn't strictly correct, but since we're
-	 * entirely outside of the PELT hierarchy, nobody cares if we truncate
-	 * _sum a little.
-	 */
-	se->avg.util_sum = se->avg.util_avg * divider;
+	///*
+	 //* Hell(o) Nasty stuff.. we need to recompute _sum based on the new
+	 //* period_contrib. This isn't strictly correct, but since we're
+	 //* entirely outside of the PELT hierarchy, nobody cares if we truncate
+	 //* _sum a little.
+	 //*/
+	//se->avg.util_sum = se->avg.util_avg * divider;
 
-	se->avg.runnable_sum = se->avg.runnable_avg * divider;
+	//se->avg.runnable_sum = se->avg.runnable_avg * divider;
 
-	se->avg.load_sum = divider;
-	if (se_weight(se)) {
-		se->avg.load_sum =
-			div_u64(se->avg.load_avg * se->avg.load_sum, se_weight(se));
-	}
+	//se->avg.load_sum = divider;
+	//if (se_weight(se)) {
+		//se->avg.load_sum =
+			//div_u64(se->avg.load_avg * se->avg.load_sum, se_weight(se));
+	//}
 
-	enqueue_load_avg(cfs_rq, se);
-	cfs_rq->avg.util_avg += se->avg.util_avg;
-	cfs_rq->avg.util_sum += se->avg.util_sum;
-	cfs_rq->avg.runnable_avg += se->avg.runnable_avg;
-	cfs_rq->avg.runnable_sum += se->avg.runnable_sum;
+	//enqueue_load_avg(cfs_rq, se);
+	//cfs_rq->avg.util_avg += se->avg.util_avg;
+	//cfs_rq->avg.util_sum += se->avg.util_sum;
+	//cfs_rq->avg.runnable_avg += se->avg.runnable_avg;
+	//cfs_rq->avg.runnable_sum += se->avg.runnable_sum;
 
-	add_tg_cfs_propagate(cfs_rq, se->avg.load_sum);
+	//add_tg_cfs_propagate(cfs_rq, se->avg.load_sum);
 
-	cfs_rq_util_change(cfs_rq, 0);
+	//cfs_rq_util_change(cfs_rq, 0);
 
-	trace_pelt_cfs_tp(cfs_rq);
+	//trace_pelt_cfs_tp(cfs_rq);
 }
 
 /**
@@ -3929,17 +3929,17 @@ static void attach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
  */
 static void detach_entity_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	dequeue_load_avg(cfs_rq, se);
-	sub_positive(&cfs_rq->avg.util_avg, se->avg.util_avg);
-	sub_positive(&cfs_rq->avg.util_sum, se->avg.util_sum);
-	sub_positive(&cfs_rq->avg.runnable_avg, se->avg.runnable_avg);
-	sub_positive(&cfs_rq->avg.runnable_sum, se->avg.runnable_sum);
+	//dequeue_load_avg(cfs_rq, se);
+	//sub_positive(&cfs_rq->avg.util_avg, se->avg.util_avg);
+	//sub_positive(&cfs_rq->avg.util_sum, se->avg.util_sum);
+	//sub_positive(&cfs_rq->avg.runnable_avg, se->avg.runnable_avg);
+	//sub_positive(&cfs_rq->avg.runnable_sum, se->avg.runnable_sum);
 
-	add_tg_cfs_propagate(cfs_rq, -se->avg.load_sum);
+	//add_tg_cfs_propagate(cfs_rq, -se->avg.load_sum);
 
-	cfs_rq_util_change(cfs_rq, 0);
+	//cfs_rq_util_change(cfs_rq, 0);
 
-	trace_pelt_cfs_tp(cfs_rq);
+	//trace_pelt_cfs_tp(cfs_rq);
 }
 
 /*
@@ -4012,11 +4012,11 @@ static inline u64 cfs_rq_last_update_time(struct cfs_rq *cfs_rq)
  */
 static void sync_entity_load_avg(struct sched_entity *se)
 {
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-	u64 last_update_time;
+	//struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	//u64 last_update_time;
 
-	last_update_time = cfs_rq_last_update_time(cfs_rq);
-	__update_load_avg_blocked_se(last_update_time, se);
+	//last_update_time = cfs_rq_last_update_time(cfs_rq);
+	//__update_load_avg_blocked_se(last_update_time, se);
 }
 
 /*
@@ -4025,23 +4025,23 @@ static void sync_entity_load_avg(struct sched_entity *se)
  */
 static void remove_entity_load_avg(struct sched_entity *se)
 {
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-	unsigned long flags;
+	//struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	//unsigned long flags;
 
-	/*
-	 * tasks cannot exit without having gone through wake_up_new_task() ->
-	 * post_init_entity_util_avg() which will have added things to the
-	 * cfs_rq, so we can remove unconditionally.
-	 */
+	///*
+	 //* tasks cannot exit without having gone through wake_up_new_task() ->
+	 //* post_init_entity_util_avg() which will have added things to the
+	 //* cfs_rq, so we can remove unconditionally.
+	 //*/
 
-	sync_entity_load_avg(se);
+	//sync_entity_load_avg(se);
 
-	raw_spin_lock_irqsave(&cfs_rq->removed.lock, flags);
-	++cfs_rq->removed.nr;
-	cfs_rq->removed.util_avg	+= se->avg.util_avg;
-	cfs_rq->removed.load_avg	+= se->avg.load_avg;
-	cfs_rq->removed.runnable_avg	+= se->avg.runnable_avg;
-	raw_spin_unlock_irqrestore(&cfs_rq->removed.lock, flags);
+	//raw_spin_lock_irqsave(&cfs_rq->removed.lock, flags);
+	//++cfs_rq->removed.nr;
+	//cfs_rq->removed.util_avg	+= se->avg.util_avg;
+	//cfs_rq->removed.load_avg	+= se->avg.load_avg;
+	//cfs_rq->removed.runnable_avg	+= se->avg.runnable_avg;
+	//raw_spin_unlock_irqrestore(&cfs_rq->removed.lock, flags);
 }
 
 static inline unsigned long cfs_rq_runnable_avg(struct cfs_rq *cfs_rq)
@@ -7030,7 +7030,6 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 
 		se->vruntime -= min_vruntime;
 	}
-#endif /* CONFIG_CACHY_SCHED */
 
 	if (p->on_rq == TASK_ON_RQ_MIGRATING) {
 		/*
@@ -7051,6 +7050,7 @@ static void migrate_task_rq_fair(struct task_struct *p, int new_cpu)
 		 */
 		remove_entity_load_avg(&p->se);
 	}
+#endif /* CONFIG_CACHY_SCHED */
 
 	/* Tell new CPU we are migrated */
 	p->se.avg.last_update_time = 0;
@@ -11242,68 +11242,68 @@ static void propagate_entity_cfs_rq(struct sched_entity *se) { }
 
 static void detach_entity_cfs_rq(struct sched_entity *se)
 {
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	//struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
-	/* Catch up with the cfs_rq and remove our load when we leave */
-	update_load_avg(cfs_rq, se, 0);
-	detach_entity_load_avg(cfs_rq, se);
-	update_tg_load_avg(cfs_rq, false);
-	propagate_entity_cfs_rq(se);
+	///* Catch up with the cfs_rq and remove our load when we leave */
+	//update_load_avg(cfs_rq, se, 0);
+	//detach_entity_load_avg(cfs_rq, se);
+	//update_tg_load_avg(cfs_rq, false);
+	//propagate_entity_cfs_rq(se);
 }
 
 static void attach_entity_cfs_rq(struct sched_entity *se)
 {
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	//struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
-#ifdef CONFIG_FAIR_GROUP_SCHED
-	/*
-	 * Since the real-depth could have been changed (only FAIR
-	 * class maintain depth value), reset depth properly.
-	 */
-	se->depth = se->parent ? se->parent->depth + 1 : 0;
-#endif
+//#ifdef CONFIG_FAIR_GROUP_SCHED
+	///*
+	 //* Since the real-depth could have been changed (only FAIR
+	 //* class maintain depth value), reset depth properly.
+	 //*/
+	//se->depth = se->parent ? se->parent->depth + 1 : 0;
+//#endif
 
-	/* Synchronize entity with its cfs_rq */
-	update_load_avg(cfs_rq, se, sched_feat(ATTACH_AGE_LOAD) ? 0 : SKIP_AGE_LOAD);
-	attach_entity_load_avg(cfs_rq, se);
-	update_tg_load_avg(cfs_rq, false);
-	propagate_entity_cfs_rq(se);
+	///* Synchronize entity with its cfs_rq */
+	//update_load_avg(cfs_rq, se, sched_feat(ATTACH_AGE_LOAD) ? 0 : SKIP_AGE_LOAD);
+	//attach_entity_load_avg(cfs_rq, se);
+	//update_tg_load_avg(cfs_rq, false);
+	//propagate_entity_cfs_rq(se);
 }
 
 static void detach_task_cfs_rq(struct task_struct *p)
 {
-	struct sched_entity *se = &p->se;
+	//struct sched_entity *se = &p->se;
 
-#if !defined(CONFIG_CACHY_SCHED)
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+//#if !defined(CONFIG_CACHY_SCHED)
+	//struct cfs_rq *cfs_rq = cfs_rq_of(se);
 
-	if (!vruntime_normalized(p)) {
-		/*
-		 * Fix up our vruntime so that the current sleep doesn't
-		 * cause 'unlimited' sleep bonus.
-		 */
-		place_entity(cfs_rq, se, 0);
-		se->vruntime -= cfs_rq->min_vruntime;
-	}
-#endif
+	//if (!vruntime_normalized(p)) {
+		///*
+		 //* Fix up our vruntime so that the current sleep doesn't
+		 //* cause 'unlimited' sleep bonus.
+		 //*/
+		//place_entity(cfs_rq, se, 0);
+		//se->vruntime -= cfs_rq->min_vruntime;
+	//}
+//#endif
 
-	detach_entity_cfs_rq(se);
+	//detach_entity_cfs_rq(se);
 }
 
 static void attach_task_cfs_rq(struct task_struct *p)
 {
-	struct sched_entity *se = &p->se;
+	//struct sched_entity *se = &p->se;
 
-#if !defined(CONFIG_CACHY_SCHED)
-	struct cfs_rq *cfs_rq = cfs_rq_of(se);
-#endif
+//#if !defined(CONFIG_CACHY_SCHED)
+	//struct cfs_rq *cfs_rq = cfs_rq_of(se);
+//#endif
 
-	attach_entity_cfs_rq(se);
+	//attach_entity_cfs_rq(se);
 
-#if !defined(CONFIG_CACHY_SCHED)
-	if (!vruntime_normalized(p))
-		se->vruntime += cfs_rq->min_vruntime;
-#endif
+//#if !defined(CONFIG_CACHY_SCHED)
+	//if (!vruntime_normalized(p))
+		//se->vruntime += cfs_rq->min_vruntime;
+//#endif
 }
 
 static void switched_from_fair(struct rq *rq, struct task_struct *p)
