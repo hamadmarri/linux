@@ -6915,28 +6915,9 @@ static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_flags)
 {
 #ifdef CONFIG_CACHY_SCHED
-	struct sched_domain *tmp, *sd = NULL;
 	int new_cpu = prev_cpu;
-	int cpu = smp_processor_id();
 
-	rcu_read_lock();
-	for_each_domain(cpu, tmp) {
-		if (tmp->flags & sd_flag)
-			sd = tmp;
-		else
-			break;
-	}
-
-	if (unlikely(sd)) {
-		/* Slow path */
-		new_cpu = find_idlest_cpu(sd, p, cpu, prev_cpu, sd_flag);
-	} else if (sd_flag & SD_BALANCE_WAKE) { /* XXX always ? */
-		/* Fast path */
-		new_cpu = select_idle_sibling(p, prev_cpu, new_cpu);
-	}
-	rcu_read_unlock();
-
-	return new_cpu;
+	return select_idle_sibling(p, prev_cpu, new_cpu);
 #else
 	struct sched_domain *tmp, *sd = NULL;
 	int cpu = smp_processor_id();
@@ -10806,11 +10787,11 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	struct cfs_rq *cfs_rq = &this_rq->cfs;
 	int this_cpu = this_rq->cpu;
 	struct task_struct *p = NULL;
-	struct rq *src_rq, *max_rq;
-	int dst_cpu = cpu_of(this_rq);
+	struct rq *src_rq;
 	int src_cpu;
 	struct rq_flags src_rf;
 	int pulled_task = 0;
+	int cores_round = 1;
 
 	update_misfit_status(NULL, this_rq);
 	/*
@@ -10825,9 +10806,6 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	if (!cpu_active(this_cpu))
 		return 0;
 
-
-	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
-
 	/*
 	 * This is OK, because current is on_cpu, which avoids it being picked
 	 * for load-balance and preemption/IRQs are still disabled avoiding
@@ -10837,14 +10815,13 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	rq_unpin_lock(this_rq, rf);
 	raw_spin_unlock(&this_rq->lock);
 
-	if (max_rq && try_pull_from(max_rq, this_rq)) {
-		pulled_task = 1;
-		goto out;
-	}
+again:
+	for_each_cpu_wrap(src_cpu, cpu_online_mask, this_cpu) {
 
-	for_each_online_cpu(src_cpu) {
+		if (src_cpu == this_cpu)
+			continue;
 
-		if (src_cpu == dst_cpu)
+		if (cores_round && !cpus_share_cache(src_cpu, this_cpu))
 			continue;
 
 		src_rq = cpu_rq(src_cpu);
@@ -10857,8 +10834,8 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 
 		p = task_of(src_rq->cfs.head);
 
-		if (cachy_can_migrate_task(p, dst_cpu, src_rq)) {
-			pull_from_unlock(this_rq, src_rq, &src_rf, p, dst_cpu);
+		if (cachy_can_migrate_task(p, this_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &src_rf, p, this_cpu);
 
 			pulled_task = 1;
 			goto out;
@@ -10873,7 +10850,13 @@ next:
 		 * now runnable tasks on this rq.
 		 */
 		if (pulled_task || this_rq->nr_running > 0)
-			break;
+			goto out;
+	}
+
+	if (cores_round) {
+		// now search for all cpus
+		cores_round = 0;
+		goto again;
 	}
 
 out:
@@ -10929,22 +10912,20 @@ static int
 idle_try_pull_any(struct cfs_rq *cfs_rq)
 {
 	struct task_struct *p = NULL;
-	struct rq *this_rq = rq_of(cfs_rq), *src_rq, *max_rq;
+	struct rq *this_rq = rq_of(cfs_rq), *src_rq;
 	int dst_cpu = cpu_of(this_rq);
 	int src_cpu;
 	struct rq_flags rf;
 	int pulled = 0;
+	int cores_round = 1;
 
-	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
-
-	if (max_rq && try_pull_from(max_rq, this_rq)) {
-		pulled = 1;
-		goto out;
-	}
-
-	for_each_online_cpu(src_cpu) {
+again:
+	for_each_cpu_wrap(src_cpu, cpu_online_mask, dst_cpu) {
 
 		if (src_cpu == dst_cpu)
+			continue;
+
+		if (cores_round && !cpus_share_cache(src_cpu, dst_cpu))
 			continue;
 
 		src_rq = cpu_rq(src_cpu);
@@ -10966,6 +10947,12 @@ idle_try_pull_any(struct cfs_rq *cfs_rq)
 next:
 		rq_unlock(src_rq, &rf);
 		local_irq_restore(rf.flags);
+	}
+
+	if (cores_round) {
+		// now search for all cpus
+		cores_round = 0;
+		goto again;
 	}
 
 out:
@@ -10994,20 +10981,19 @@ static void try_pull_any(struct rq *this_rq)
 {
 	struct cfs_rq *cfs_rq = &this_rq->cfs;
 	struct task_struct *p = NULL;
-	struct rq *src_rq, *max_rq;
+	struct rq *src_rq;
 	int dst_cpu = cpu_of(this_rq);
 	int src_cpu;
 	struct rq_flags src_rf;
+	int cores_round = 1;
 
-	max_rq = find_max_hrrn_rq(cfs_rq, dst_cpu);
-
-	if (max_rq && try_pull_from(max_rq, this_rq))
-		return;
-
-	// try pull any task from cfs.nr_running >= 2
-	for_each_online_cpu(src_cpu) {
+again:
+	for_each_cpu_wrap(src_cpu, cpu_online_mask, dst_cpu) {
 
 		if (src_cpu == dst_cpu)
+			continue;
+
+		if (cores_round && !cpus_share_cache(src_cpu, dst_cpu))
 			continue;
 
 		src_rq = cpu_rq(src_cpu);
@@ -11028,6 +11014,12 @@ static void try_pull_any(struct rq *this_rq)
 next:
 		rq_unlock(src_rq, &src_rf);
 		local_irq_restore(src_rf.flags);
+	}
+
+	if (cores_round) {
+		// now search for all cpus
+		cores_round = 0;
+		goto again;
 	}
 }
 
