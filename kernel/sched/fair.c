@@ -10816,7 +10816,8 @@ static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 	raw_spin_unlock(&this_rq->lock);
 
 again:
-	for_each_cpu_wrap(src_cpu, cpu_online_mask, this_cpu) {
+	//for_each_cpu_wrap(src_cpu, cpu_online_mask, this_cpu) {
+	for_each_online_cpu(src_cpu) {
 
 		if (src_cpu == this_cpu)
 			continue;
@@ -10920,7 +10921,8 @@ idle_try_pull_any(struct cfs_rq *cfs_rq)
 	int cores_round = 1;
 
 again:
-	for_each_cpu_wrap(src_cpu, cpu_online_mask, dst_cpu) {
+	//for_each_cpu_wrap(src_cpu, cpu_online_mask, dst_cpu) {
+	for_each_online_cpu(src_cpu) {
 
 		if (src_cpu == dst_cpu)
 			continue;
@@ -10988,7 +10990,8 @@ static void try_pull_any(struct rq *this_rq)
 	int cores_round = 1;
 
 again:
-	for_each_cpu_wrap(src_cpu, cpu_online_mask, dst_cpu) {
+	//for_each_cpu_wrap(src_cpu, cpu_online_mask, dst_cpu) {
+	for_each_online_cpu(src_cpu) {
 
 		if (src_cpu == dst_cpu)
 			continue;
