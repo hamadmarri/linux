@@ -827,10 +827,10 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
 }
 EXPORT_SYMBOL_GPL(replace_page_cache_page);
 
-static int __add_to_page_cache_locked(struct page *page,
-				      struct address_space *mapping,
-				      pgoff_t offset, gfp_t gfp_mask,
-				      void **shadowp)
+noinline int __add_to_page_cache_locked(struct page *page,
+					struct address_space *mapping,
+					pgoff_t offset, gfp_t gfp_mask,
+					void **shadowp)
 {
 	XA_STATE(xas, &mapping->i_pages, offset);
 	int huge = PageHuge(page);
@@ -2179,6 +2179,14 @@ ssize_t generic_file_buffered_read(struct kiocb *iocb,
 	last_index = (*ppos + iter->count + PAGE_SIZE-1) >> PAGE_SHIFT;
 	offset = *ppos & ~PAGE_MASK;
 
+	/*
+	 * If we've already successfully copied some data, then we
+	 * can no longer safely return -EIOCBQUEUED. Hence mark
+	 * an async read NOWAIT at that point.
+	 */
+	if (written && (iocb->ki_flags & IOCB_WAITQ))
+		iocb->ki_flags |= IOCB_NOWAIT;
+
 	for (;;) {
 		struct page *page;
 		pgoff_t end_index;
@@ -2319,10 +2327,15 @@ page_ok:
 
 page_not_up_to_date:
 		/* Get exclusive access to the page ... */
-		if (iocb->ki_flags & IOCB_WAITQ)
+		if (iocb->ki_flags & IOCB_WAITQ) {
+			if (written) {
+				put_page(page);
+				goto out;
+			}
 			error = lock_page_async(page, iocb->ki_waitq);
-		else
+		} else {
 			error = lock_page_killable(page);
+		}
 		if (unlikely(error))
 			goto readpage_error;
 
@@ -2365,10 +2378,15 @@ readpage:
 		}
 
 		if (!PageUptodate(page)) {
-			if (iocb->ki_flags & IOCB_WAITQ)
+			if (iocb->ki_flags & IOCB_WAITQ) {
+				if (written) {
+					put_page(page);
+					goto out;
+				}
 				error = lock_page_async(page, iocb->ki_waitq);
-			else
+			} else {
 				error = lock_page_killable(page);
+			}
 
 			if (unlikely(error))
 				goto readpage_error;
