@@ -43,7 +43,7 @@ unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 #ifdef CONFIG_CACHY_SCHED
-int interactivity_factor				= 50ULL;
+int interactivity_factor				= 10ULL;
 #endif
 
 /*
