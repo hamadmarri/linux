@@ -1659,17 +1659,10 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
-#if CONFIG_CACHY_SCHED
+#ifdef CONFIG_CACHY_SCHED
 	{
-		.procname	= "sched_hrrn_max_lifetime_ms",
-		.data		= &hrrn_max_lifetime,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= proc_dointvec,
-	},
-	{
-		.procname	= "sched_cachy_harsh_mode_enabled",
-		.data		= &cachy_harsh_mode,
+		.procname	= "sched_interactivity_factor",
+		.data		= &interactivity_factor,
 		.maxlen		= sizeof(int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,

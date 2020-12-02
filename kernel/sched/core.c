@@ -3360,8 +3360,7 @@ void wake_up_new_task(struct task_struct *p)
 	post_init_entity_util_avg(p);
 
 #ifdef CONFIG_CACHY_SCHED
-	if (!cachy_harsh_mode)
-		p->se.hrrn_start_time = rq_clock(rq);
+	p->se.hrrn_start_time = sched_clock();
 #endif
 
 	activate_task(rq, p, ENQUEUE_NOCLOCK);
@@ -7079,7 +7078,7 @@ void __init sched_init(void)
 #endif
 
 #ifdef CONFIG_CACHY_SCHED
-	printk(KERN_INFO "Cachy CPU scheduler v5.9-r8 by Hamad Al Marri.");
+	printk(KERN_INFO "CacULE CPU scheduler v5.9-r9 by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();

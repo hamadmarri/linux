@@ -43,9 +43,7 @@ unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
 #ifdef CONFIG_CACHY_SCHED
-int hrrn_max_lifetime					= 30000; // in ms
-int cachy_harsh_mode					= 0;
-#define U64_TO_U32(X) ((u32) (((X) >> 8) & 0xFFFFFFFF))
+int interactivity_factor				= 50ULL;
 #endif
 
 /*
@@ -581,40 +579,48 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 #endif /* CONFIG_CACHY_SCHED */
 
 #ifdef CONFIG_CACHY_SCHED
-/*
- * Does se have higher HRRN value than curr? If yes, return 1,
- * otherwise return -1
- * se is before curr if se has higher HRRN
- */
-static int
-entity_before(u64 now, struct sched_entity *curr, struct sched_entity *se)
+
+static inline unsigned int
+calc_interactivity(u64 now, struct sched_entity *se)
 {
-	u32 l_curr, l_se, r_curr, r_se, vr_curr, vr_se;
-	s32 diff;
+	u64 l_se, vr_se, sleep_se, u64_factor;
+	unsigned int score_se;
 
 	/*
 	 * in case of vruntime==0, logical OR with 1 would
 	 * make sure that the least sig. bit is 1
 	 */
-	vr_curr	= U64_TO_U32(curr->vruntime)	| 1;
-	vr_se	= U64_TO_U32(se->vruntime)	| 1;
+	l_se		= (now + 1ULL) - se->hrrn_start_time;
+	vr_se		= se->vruntime		| 1;
+	sleep_se	= (l_se - vr_se)	| 1;
+	u64_factor	= interactivity_factor;
 
-	l_curr	= U64_TO_U32(now - curr->hrrn_start_time);
-	l_se	= U64_TO_U32(now - se->hrrn_start_time);
+	if (sleep_se > vr_se)
+		score_se = u64_factor / (sleep_se / vr_se);
+	else
+		score_se = (u64_factor / (vr_se / sleep_se)) + u64_factor;
 
-	r_curr	= l_curr / vr_curr;
-	r_se	= l_se / vr_se;
+	return score_se;
+}
 
-	diff	= r_se - r_curr;
+/*
+ * Does se have lower interactivity score value (i.e. interactive) than curr? If yes, return 1,
+ * otherwise return -1
+ * se is before curr if se has lower interactivity score value
+ * the lower score, the more interactive
+ */
+static int
+entity_before(u64 now, struct sched_entity *curr, struct sched_entity *se)
+{
+	unsigned int score_curr, score_se;
+	int diff;
 
-	// take the remainder if equal
-	if (diff == 0) {
-		r_curr	= l_curr % vr_curr;
-		r_se	= l_se % vr_se;
-		diff	= r_se - r_curr;
-	}
+	score_curr	= calc_interactivity(now, curr);
+	score_se	= calc_interactivity(now, se);
 
-	if (diff > 0)
+	diff		= score_se - score_curr;
+
+	if (diff < 0)
 		return 1;
 
 	return -1;
@@ -625,47 +631,14 @@ entity_before(u64 now, struct sched_entity *curr, struct sched_entity *se)
  */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 {
-	struct sched_entity *iter, *prev = NULL;
-	u64 now = rq_clock(rq_of(cfs_rq));
 	se->next = NULL;
 	se->prev = NULL;
 
 	if (likely(cfs_rq->head)) {
-
-		// start from head
-		iter = cfs_rq->head;
-
-		// does iter have higher HRRN value than se?
-		while (iter && entity_before(now, se, iter) == 1) {
-			prev = iter;
-			iter = iter->next;
-		}
-
-		// if iter == NULL, insert se at the end
-		if (iter == NULL) {
-			prev->next	= se;
-			se->prev	= prev;
-		}
-		// else if not head, insert se before iter
-		else if (iter != cfs_rq->head) {
-			se->next	= iter;
-			se->prev	= prev;
-
-			iter->prev	= se;
-			prev->next	= se;
-		}
-		// else iter == head, insert se at head
-		else {
-			se->next		= cfs_rq->head;
-			cfs_rq->head->prev	= se;
-
-			// lastly reset the head
-			cfs_rq->head = se;
-		}
-		return;
+		se->next = cfs_rq->head;
+		cfs_rq->head->prev = se;
 	}
 
-	// if empty rq
 	cfs_rq->head = se;
 }
 
@@ -972,34 +945,6 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq, int force)
 }
 #endif /* CONFIG_SMP */
 
-#ifdef CONFIG_CACHY_SCHED
-static void reset_lifetime(u64 now, struct sched_entity *se)
-{
-	/*
-	 * left shift 20 bits is approximately = * 1000000
-	 * we don't need the precision of life time
-	 * Ex. for 30s, with left shift (20bits) == 31.457s
-	 */
-	u64 max_life_ns	= ((u64) hrrn_max_lifetime) << 20;
-	u64 life_time	= now - se->hrrn_start_time;
-	s64 diff	= life_time - max_life_ns;
-
-	if (unlikely(diff > 0)) {
-		// multiply life_time by 8 for more precision
-		u64 old_hrrn_x8	= life_time / ((se->vruntime >> 3) | 1);
-
-		// reset life to half max_life (i.e ~15s)
-		se->hrrn_start_time = now - (max_life_ns >> 1);
-
-		// avoid division by zero
-		if (old_hrrn_x8 == 0) old_hrrn_x8 = 1;
-
-		// reset vruntime based on old hrrn ration
-		se->vruntime = (max_life_ns << 2) / old_hrrn_x8;
-	}
-}
-#endif /* CONFIG_CACHY_SCHED */
-
 /*
  * Update the current task's runtime statistics.
  */
@@ -1026,9 +971,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
 
-#ifdef CONFIG_CACHY_SCHED
-	reset_lifetime(rq_clock(rq_of(cfs_rq)), curr);
-#else
+#if !defined(CONFIG_CACHY_SCHED)
 	update_min_vruntime(cfs_rq);
 #endif
 
@@ -4535,16 +4478,17 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 }
 
 #ifdef CONFIG_CACHY_SCHED
+static struct sched_entity *
+pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
+
 /*
  * Preempt the current task with a newly woken task if needed:
  */
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	u64 now = rq_clock(rq_of(cfs_rq));
-
 	// does head have higher HRRN value than curr
-	if (entity_before(now, curr, cfs_rq->head) == 1)
+	if (pick_next_entity(cfs_rq, curr) != curr)
 		resched_curr(rq_of(cfs_rq));
 }
 #else
@@ -4626,12 +4570,18 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct sched_entity *se = cfs_rq->head;
-	u64 now = rq_clock(rq_of(cfs_rq));
+	struct sched_entity *se		= cfs_rq->head;
+	struct sched_entity *next	= se->next;
+	u64 now = sched_clock();
 
-	if (unlikely(!se))
-		se = curr;
-	else if (unlikely(curr && entity_before(now, se, curr) == 1))
+	while (next) {
+		if (entity_before(now, se, next) == 1)
+			se = next;
+
+		next = next->next;
+	}
+
+	if (curr && entity_before(now, se, curr) == 1)
 		se = curr;
 
 	return se;
@@ -7185,7 +7135,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	BUG_ON(!pse);
 
 #ifdef CONFIG_CACHY_SCHED
-	if (entity_before(rq_clock(rq), se, pse) == 1)
+	if (entity_before(sched_clock(), se, pse) == 1)
 		goto preempt;
 #else
 	if (wakeup_preempt_entity(se, pse) == 1) {
