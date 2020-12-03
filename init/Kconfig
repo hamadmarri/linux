@@ -823,13 +823,12 @@ config UCLAMP_BUCKETS_COUNT
 endmenu
 
 config CACHY_SCHED
-	bool "Cachy CPU scheduler"
+	bool "CacULE CPU scheduler"
 	default y
 	help
-	  The Cachy CPU scheduler that is based on Highest Response Ratio Next
-	  (HRRN) policy.
-
-	  Is designed for desktop usage since it is about responsiveness.
+	  The CacULE CPU scheduler is based on interactivity score mechanism.
+	  The interactivity score is inspired by the ULE scheduler (FreeBSD
+	  scheduler).
 
 	  If unsure, say Y here.
 
