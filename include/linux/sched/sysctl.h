@@ -31,7 +31,7 @@ extern unsigned int sysctl_sched_min_granularity;
 extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int sysctl_sched_child_runs_first;
 
-#ifdef CONFIG_CACHY_SCHED
+#ifdef CONFIG_CACULE_SCHED
 extern int interactivity_factor;
 #endif
 

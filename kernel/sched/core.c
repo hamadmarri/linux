@@ -3359,7 +3359,7 @@ void wake_up_new_task(struct task_struct *p)
 	update_rq_clock(rq);
 	post_init_entity_util_avg(p);
 
-#ifdef CONFIG_CACHY_SCHED
+#ifdef CONFIG_CACULE_SCHED
 	p->se.hrrn_start_time = sched_clock();
 #endif
 
@@ -7077,7 +7077,7 @@ void __init sched_init(void)
 	BUG_ON(&dl_sched_class + 1 != &stop_sched_class);
 #endif
 
-#ifdef CONFIG_CACHY_SCHED
+#ifdef CONFIG_CACULE_SCHED
 	printk(KERN_INFO "CacULE CPU scheduler v5.9-r9 by Hamad Al Marri.");
 #endif
 

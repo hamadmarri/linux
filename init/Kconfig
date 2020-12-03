@@ -822,7 +822,7 @@ config UCLAMP_BUCKETS_COUNT
 
 endmenu
 
-config CACHY_SCHED
+config CACULE_SCHED
 	bool "CacULE CPU scheduler"
 	default y
 	help

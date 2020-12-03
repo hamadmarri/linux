@@ -452,7 +452,7 @@ struct sched_entity {
 	/* For load-balancing: */
 	struct load_weight		load;
 	struct rb_node			run_node;
-#ifdef CONFIG_CACHY_SCHED
+#ifdef CONFIG_CACULE_SCHED
 	struct sched_entity* 		next;
 	struct sched_entity* 		prev;
 	u64				hrrn_start_time;

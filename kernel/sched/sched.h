@@ -524,12 +524,12 @@ struct cfs_rq {
 
 	u64			exec_clock;
 
-#if !defined(CONFIG_CACHY_SCHED)
+#if !defined(CONFIG_CACULE_SCHED)
 	u64			min_vruntime;
 #ifndef CONFIG_64BIT
 	u64			min_vruntime_copy;
 #endif
-#endif // CONFIG_CACHY_SCHED
+#endif // CONFIG_CACULE_SCHED
 
 	struct rb_root_cached	tasks_timeline;
 
@@ -538,13 +538,13 @@ struct cfs_rq {
 	 * It is set to NULL otherwise (i.e when none are currently running).
 	 */
 	struct sched_entity	*curr;
-#ifdef CONFIG_CACHY_SCHED
+#ifdef CONFIG_CACULE_SCHED
 	struct sched_entity	*head;
 #else
 	struct sched_entity	*next;
 	struct sched_entity	*last;
 	struct sched_entity	*skip;
-#endif // CONFIG_CACHY_SCHED
+#endif // CONFIG_CACULE_SCHED
 
 #ifdef	CONFIG_SCHED_DEBUG
 	unsigned int		nr_spread_over;
