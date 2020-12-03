@@ -7078,7 +7078,7 @@ void __init sched_init(void)
 #endif
 
 #ifdef CONFIG_CACULE_SCHED
-	printk(KERN_INFO "CacULE CPU scheduler v5.9-r9 by Hamad Al Marri.");
+	printk(KERN_INFO "CacULE CPU scheduler v5.9 by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();

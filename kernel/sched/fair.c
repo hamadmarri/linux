@@ -20,8 +20,8 @@
  *  Adaptive scheduling granularity, math enhancements by Peter Zijlstra
  *  Copyright (C) 2007 Red Hat, Inc., Peter Zijlstra
  *
- *  Cachy enhancements CPU cache and scheduler based on
- *  Highest Response Ratio Next (HRRN) policy.
+ *  CacULE enhancements CPU cache and scheduler based on
+ *  Interactivity Score.
  *  (C) 2020 Hamad Al Marri <hamad.s.almarri@gmail.com>
  */
 #include "sched.h"
@@ -978,10 +978,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
 
-#if !defined(CONFIG_CACULE_SCHED)
 		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
-#endif
-
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
 	}
