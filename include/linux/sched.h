@@ -455,7 +455,7 @@ struct sched_entity {
 #ifdef CONFIG_CACULE_SCHED
 	struct sched_entity* 		next;
 	struct sched_entity* 		prev;
-	u64				hrrn_start_time;
+	u64				cacule_start_time;
 #endif
 	struct list_head		group_node;
 	unsigned int			on_rq;

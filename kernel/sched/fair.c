@@ -590,7 +590,7 @@ calc_interactivity(u64 now, struct sched_entity *se)
 	 * in case of vruntime==0, logical OR with 1 would
 	 * make sure that the least sig. bit is 1
 	 */
-	l_se		= (now + 1ULL) - se->hrrn_start_time;
+	l_se		= (now + 1ULL) - se->cacule_start_time;
 	vr_se		= se->vruntime		| 1;
 	sleep_se	= (l_se - vr_se)	| 1;
 	u64_factor	= interactivity_factor;

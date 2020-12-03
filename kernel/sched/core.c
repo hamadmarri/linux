@@ -3360,7 +3360,7 @@ void wake_up_new_task(struct task_struct *p)
 	post_init_entity_util_avg(p);
 
 #ifdef CONFIG_CACULE_SCHED
-	p->se.hrrn_start_time = sched_clock();
+	p->se.cacule_start_time = sched_clock();
 #endif
 
 	activate_task(rq, p, ENQUEUE_NOCLOCK);
