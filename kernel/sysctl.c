@@ -1659,7 +1659,7 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
-#ifdef CONFIG_CACHY_SCHED
+#ifdef CONFIG_CACULE_SCHED
 	{
 		.procname	= "sched_interactivity_factor",
 		.data		= &interactivity_factor,
