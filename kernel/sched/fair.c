@@ -261,6 +261,14 @@ static u64 __calc_delta(u64 delta_exec, unsigned long weight, struct load_weight
 
 const struct sched_class fair_sched_class;
 
+
+#ifdef CONFIG_CACULE_SCHED
+static inline struct sched_entity *se_of(struct cacule_node *cn)
+{
+	return container_of(cn, struct sched_entity, cacule_node);
+}
+#endif
+
 /**************************************************************
  * CFS operations on generic schedulable entities:
  */
@@ -581,7 +589,7 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 #ifdef CONFIG_CACULE_SCHED
 
 static inline unsigned int
-calc_interactivity(u64 now, struct sched_entity *se)
+calc_interactivity(u64 now, struct cacule_node *se)
 {
 	u64 l_se, vr_se, sleep_se, u64_factor;
 	unsigned int score_se;
@@ -610,7 +618,7 @@ calc_interactivity(u64 now, struct sched_entity *se)
  * the lower score, the more interactive
  */
 static int
-entity_before(u64 now, struct sched_entity *curr, struct sched_entity *se)
+entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
 {
 	unsigned int score_curr, score_se;
 	int diff;
@@ -629,8 +637,9 @@ entity_before(u64 now, struct sched_entity *curr, struct sched_entity *se)
 /*
  * Enqueue an entity
  */
-static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 {
+	struct cacule_node *se = &(_se->cacule_node);
 	se->next = NULL;
 	se->prev = NULL;
 
@@ -642,8 +651,10 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	cfs_rq->head = se;
 }
 
-static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
+static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 {
+	struct cacule_node *se = &(_se->cacule_node);
+
 	// if only one se in rq
 	if (cfs_rq->head->next == NULL)
 		cfs_rq->head = NULL;
@@ -656,8 +667,8 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	else
 	{
 		// if in the middle
-		struct sched_entity *prev = se->prev;
-		struct sched_entity *next = se->next;
+		struct cacule_node *prev = se->prev;
+		struct cacule_node *next = se->next;
 
 		prev->next = next;
 
@@ -668,7 +679,7 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 
 struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
 {
-	return cfs_rq->head;
+	return se_of(cfs_rq->head);
 }
 #else
 /*
@@ -969,16 +980,22 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
-	curr->vruntime += calc_delta_fair(delta_exec, curr);
 
-#if !defined(CONFIG_CACULE_SCHED)
+#ifdef CONFIG_CACULE_SCHED
+	curr->cacule_node.vruntime += calc_delta_fair(delta_exec, curr);
+#else
+	curr->vruntime += calc_delta_fair(delta_exec, curr);
 	update_min_vruntime(cfs_rq);
 #endif
 
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
 
-		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+#ifdef CONFIG_CACULE_SCHED
+	trace_sched_stat_runtime(curtask, delta_exec, curr->cacule_node.vruntime);
+#else
+	trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+#endif
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
 	}
@@ -4567,8 +4584,8 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct sched_entity *se		= cfs_rq->head;
-	struct sched_entity *next	= se->next;
+	struct cacule_node *se		= cfs_rq->head;
+	struct cacule_node *next	= se->next;
 	u64 now = sched_clock();
 
 	while (next) {
@@ -4578,10 +4595,10 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 		next = next->next;
 	}
 
-	if (curr && entity_before(now, se, curr) == 1)
-		se = curr;
+	if (curr && entity_before(now, se, &curr->cacule_node) == 1)
+		se = &curr->cacule_node;
 
-	return se;
+	return se_of(se);
 }
 #else
 static int
@@ -7132,7 +7149,7 @@ static void check_preempt_wakeup(struct rq *rq, struct task_struct *p, int wake_
 	BUG_ON(!pse);
 
 #ifdef CONFIG_CACULE_SCHED
-	if (entity_before(sched_clock(), se, pse) == 1)
+	if (entity_before(sched_clock(), &se->cacule_node, &pse->cacule_node) == 1)
 		goto preempt;
 #else
 	if (wakeup_preempt_entity(se, pse) == 1) {

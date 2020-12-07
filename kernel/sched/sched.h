@@ -539,7 +539,7 @@ struct cfs_rq {
 	 */
 	struct sched_entity	*curr;
 #ifdef CONFIG_CACULE_SCHED
-	struct sched_entity	*head;
+	struct cacule_node	*head;
 #else
 	struct sched_entity	*next;
 	struct sched_entity	*last;
