@@ -6874,15 +6874,13 @@ fail:
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_flags)
 {
-#ifdef CONFIG_CACULE_SCHED
-	return prev_cpu;
-#else
 	struct sched_domain *tmp, *sd = NULL;
 	int cpu = smp_processor_id();
 	int new_cpu = prev_cpu;
 	int want_affine = 0;
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 
+#if !defined(CONFIG_CACULE_SCHED)
 	if (sd_flag & SD_BALANCE_WAKE) {
 		record_wakee(p);
 
@@ -6895,6 +6893,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 
 		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 	}
+#endif
 
 	rcu_read_lock();
 	for_each_domain(cpu, tmp) {
@@ -6931,7 +6930,6 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	rcu_read_unlock();
 
 	return new_cpu;
-#endif
 }
 
 static void detach_entity_cfs_rq(struct sched_entity *se);
