@@ -745,7 +745,15 @@ static struct sched_entity *__pick_next_entity(struct sched_entity *se)
 struct sched_entity *__pick_last_entity(struct cfs_rq *cfs_rq)
 {
 #ifdef CONFIG_CACULE_SCHED
-	return cfs_rq->head;
+	struct cacule_node *cn = cfs_rq->head;
+
+	if (!cn)
+		return NULL;
+
+	while (cn->next)
+		cn = cn->next;
+
+	return se_of(cn);
 #else
 	struct rb_node *last = rb_last(&cfs_rq->tasks_timeline.rb_root);
 
