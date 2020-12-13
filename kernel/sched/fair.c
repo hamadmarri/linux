@@ -4592,10 +4592,14 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct cacule_node *se		= cfs_rq->head;
-	struct cacule_node *next	= se->next;
+	struct cacule_node *se = cfs_rq->head;
+	struct cacule_node *next;
 	u64 now = sched_clock();
 
+	if (!se)
+		return curr;
+
+	next = se->next;
 	while (next) {
 		if (entity_before(now, se, next) == 1)
 			se = next;
