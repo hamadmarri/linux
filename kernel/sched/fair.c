@@ -42,11 +42,8 @@
 unsigned int sysctl_sched_latency			= 6000000ULL;
 static unsigned int normalized_sysctl_sched_latency	= 6000000ULL;
 
-int cacule_max_lifetime					= 30000; // in ms
-
-#define U64_TO_U32(X) ((u32) (((X) >> 8) & 0xFFFFFFFF))
-
 #ifdef CONFIG_CACULE_SCHED
+int cacule_max_lifetime					= 30000; // in ms
 int interactivity_factor				= 32768;
 #endif
 
