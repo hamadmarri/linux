@@ -1010,7 +1010,7 @@ static void reset_lifetime(u64 now, struct sched_entity *se)
 static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
-	u64 now = rq_clock_task(rq_of(cfs_rq));
+	u64 now = sched_clock();
 	u64 delta_exec;
 
 	if (unlikely(!curr))
