@@ -4336,9 +4336,9 @@ place_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int initial)
 	/* ensure we never gain time by being placed backwards. */
 	se->vruntime = max_vruntime(se->vruntime, vruntime);
 }
-#endif /* CONFIG_CACHY_SCHED */
 
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq);
+#endif /* CONFIG_CACHY_SCHED */
 
 static inline void check_schedstat_required(void)
 {
@@ -5616,7 +5616,11 @@ static inline bool cfs_bandwidth_used(void)
 
 static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
+
+#if !defined(CONFIG_CACHY_SCHED)
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
+#endif
+
 static inline void sync_throttle(struct task_group *tg, int cpu) {}
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
 
@@ -6068,6 +6072,7 @@ static int wake_wide(struct task_struct *p)
 }
 #endif
 
+#if !defined(CONFIG_CACHY_SCHED)
 /*
  * The purpose of wake_affine() is to quickly determine on which CPU we can run
  * soonest. For the purpose of speed we only consider the waking and previous
@@ -6166,6 +6171,7 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 	schedstat_inc(p->se.statistics.nr_wakeups_affine);
 	return target;
 }
+#endif
 
 static struct sched_group *
 find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu);
@@ -7313,9 +7319,88 @@ again:
 	if (!sched_fair_runnable(rq))
 		goto idle;
 
+#ifdef CONFIG_FAIR_GROUP_SCHED
+	if (!prev || prev->sched_class != &fair_sched_class)
+		goto simple;
+
+	/*
+	 * Because of the set_next_buddy() in dequeue_task_fair() it is rather
+	 * likely that a next task is from the same cgroup as the current.
+	 *
+	 * Therefore attempt to avoid putting and setting the entire cgroup
+	 * hierarchy, only change the part that actually changes.
+	 */
+
+	do {
+		struct sched_entity *curr = cfs_rq->curr;
+
+		/*
+		 * Since we got here without doing put_prev_entity() we also
+		 * have to consider cfs_rq->curr. If it is still a runnable
+		 * entity, update_curr() will update its vruntime, otherwise
+		 * forget we've ever seen it.
+		 */
+		if (curr) {
+			if (curr->on_rq)
+				update_curr(cfs_rq);
+			else
+				curr = NULL;
+
+			/*
+			 * This call to check_cfs_rq_runtime() will do the
+			 * throttle and dequeue its entity in the parent(s).
+			 * Therefore the nr_running test will indeed
+			 * be correct.
+			 */
+			if (unlikely(check_cfs_rq_runtime(cfs_rq))) {
+				cfs_rq = &rq->cfs;
+
+				if (!cfs_rq->nr_running)
+					goto idle;
+
+				goto simple;
+			}
+		}
+
+		se = pick_next_entity(cfs_rq, curr);
+		cfs_rq = group_cfs_rq(se);
+	} while (cfs_rq);
+
+	p = task_of(se);
+
+	/*
+	 * Since we haven't yet done put_prev_entity and if the selected task
+	 * is a different task than we started out with, try and touch the
+	 * least amount of cfs_rqs.
+	 */
+	if (prev != p) {
+		struct sched_entity *pse = &prev->se;
+
+		while (!(cfs_rq = is_same_group(se, pse))) {
+			int se_depth = se->depth;
+			int pse_depth = pse->depth;
+
+			if (se_depth <= pse_depth) {
+				put_prev_entity(cfs_rq_of(pse), pse);
+				pse = parent_entity(pse);
+			}
+			if (se_depth >= pse_depth) {
+				set_next_entity(cfs_rq_of(se), se);
+				se = parent_entity(se);
+			}
+		}
+
+		put_prev_entity(cfs_rq, pse);
+		set_next_entity(cfs_rq, se);
+	}
+
+	goto done;
+simple:
+#endif
 	if (prev)
 		put_prev_task(rq, prev);
 
+#ifdef CONFIG_CACHY_SCHED
 	se = pick_next_entity(cfs_rq, NULL);
 	set_next_entity(cfs_rq, se);
 
@@ -7325,6 +7410,13 @@ again:
 	} else {
 		WRITE_ONCE(cfs_rq->hrrn_head, 0UL);
 	}
+#else
+	do {
+		se = pick_next_entity(cfs_rq, NULL);
+		set_next_entity(cfs_rq, se);
+		cfs_rq = group_cfs_rq(se);
+	} while (cfs_rq);
+#endif
 
 	p = task_of(se);
 
@@ -7346,7 +7438,9 @@ done: __maybe_unused;
 	return p;
 
 idle:
+#ifdef CONFIG_CACHY_SCHED
 	WRITE_ONCE(cfs_rq->hrrn_head, 0UL);
+#endif
 
 	if (!rf)
 		return NULL;
@@ -7655,6 +7749,7 @@ struct lb_env {
 	struct list_head	tasks;
 };
 
+#if !defined(CONFIG_CACHY_SCHED)
 /*
  * Is this task likely cache-hot:
  */
@@ -7670,7 +7765,6 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 	if (unlikely(task_has_idle_policy(p)))
 		return 0;
 
-#if !defined(CONFIG_CACHY_SCHED)
 	/*
 	 * Buddy candidates are cache hot:
 	 */
@@ -7678,7 +7772,6 @@ static int task_hot(struct task_struct *p, struct lb_env *env)
 			(&p->se == cfs_rq_of(&p->se)->next ||
 			 &p->se == cfs_rq_of(&p->se)->last))
 		return 1;
-#endif
 
 	if (sysctl_sched_migration_cost == -1)
 		return 1;
@@ -8004,7 +8097,9 @@ next:
 
 	return detached;
 }
+#endif
 
+#if !defined(CONFIG_CACHY_SCHED)
 /*
  * attach_task() -- attach the task detached by detach_task() to its new rq.
  */
@@ -8053,6 +8148,7 @@ static void attach_tasks(struct lb_env *env)
 
 	rq_unlock(env->dst_rq, &rf);
 }
+#endif
 
 #ifdef CONFIG_NO_HZ_COMMON
 static inline bool cfs_rq_has_blocked(struct cfs_rq *cfs_rq)
@@ -8098,11 +8194,9 @@ static inline bool others_have_blocked(struct rq *rq) { return false; }
 static inline void update_blocked_load_status(struct rq *rq, bool has_blocked) {}
 #endif
 
+#if !defined(CONFIG_CACHY_SCHED)
 static bool __update_blocked_others(struct rq *rq, bool *done)
 {
-#ifdef CONFIG_CACHY_SCHED
-	return 0;
-#else
 	const struct sched_class *curr_class;
 	u64 now = rq_clock_pelt(rq);
 	unsigned long thermal_pressure;
@@ -8125,8 +8219,8 @@ static bool __update_blocked_others(struct rq *rq, bool *done)
 		*done = false;
 
 	return decayed;
-#endif
 }
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 
@@ -8234,11 +8328,9 @@ static unsigned long task_h_load(struct task_struct *p)
 			cfs_rq_load_avg(cfs_rq) + 1);
 }
 #else
+#if !defined(CONFIG_CACHY_SCHED)
 static bool __update_blocked_fair(struct rq *rq, bool *done)
 {
-#ifdef CONFIG_CACHY_SCHED
-	return 0;
-#else
 	struct cfs_rq *cfs_rq = &rq->cfs;
 	bool decayed;
 
@@ -8247,8 +8339,8 @@ static bool __update_blocked_fair(struct rq *rq, bool *done)
 		*done = false;
 
 	return decayed;
-#endif
 }
+#endif
 
 static unsigned long task_h_load(struct task_struct *p)
 {
@@ -9417,6 +9509,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
  *            different in groups.
  */
 
+#if !defined(CONFIG_CACHY_SCHED)
 /**
  * find_busiest_group - Returns the busiest group within the sched_domain
  * if there is an imbalance.
@@ -9682,6 +9775,7 @@ static struct rq *find_busiest_queue(struct lb_env *env,
 
 	return busiest;
 }
+#endif
 
 /*
  * Max backoff if we encounter pinned tasks. Pretty arbitrary value, but
@@ -9728,6 +9822,7 @@ voluntary_active_balance(struct lb_env *env)
 	return 0;
 }
 
+#if !defined(CONFIG_CACHY_SCHED)
 static int need_active_balance(struct lb_env *env)
 {
 	struct sched_domain *sd = env->sd;
@@ -9739,6 +9834,7 @@ static int need_active_balance(struct lb_env *env)
 }
 
 static int active_load_balance_cpu_stop(void *data);
+
 
 static int should_we_balance(struct lb_env *env)
 {
@@ -9772,7 +9868,6 @@ static int should_we_balance(struct lb_env *env)
 	return group_balance_cpu(sg) == env->dst_cpu;
 }
 
-#if !defined(CONFIG_CACHY_SCHED)
 /*
  * Check this_cpu to ensure it is balanced within domain. Attempt to move
  * tasks if there is an imbalance.
@@ -10080,6 +10175,7 @@ update_next_balance(struct sched_domain *sd, unsigned long *next_balance)
 		*next_balance = next;
 }
 
+#if !defined(CONFIG_CACHY_SCHED)
 /*
  * active_load_balance_cpu_stop is run by the CPU stopper. It pushes
  * running tasks off the busiest CPU onto idle CPUs. It requires at
@@ -10170,7 +10266,6 @@ out_unlock:
 	return 0;
 }
 
-#if !defined(CONFIG_CACHY_SCHED)
 static DEFINE_SPINLOCK(balancing);
 #endif
 
@@ -10755,6 +10850,7 @@ static inline void nohz_newidle_balance(struct rq *this_rq) { }
 
 #endif /* CONFIG_NO_HZ_COMMON */
 
+#ifdef CONFIG_CACHY_SCHED
 static int
 cachy_can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
 {
@@ -10961,8 +11057,118 @@ out:
 
 	return pulled_task;
 }
+#else
+static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
+{
+	unsigned long next_balance = jiffies + HZ;
+	int this_cpu = this_rq->cpu;
+	struct sched_domain *sd;
+	int pulled_task = 0;
+	u64 curr_cost = 0;
 
-#if !defined(CONFIG_CACHY_SCHED)
+	update_misfit_status(NULL, this_rq);
+	/*
+	 * We must set idle_stamp _before_ calling idle_balance(), such that we
+	 * measure the duration of idle_balance() as idle time.
+	 */
+	this_rq->idle_stamp = rq_clock(this_rq);
+
+	/*
+	 * Do not pull tasks towards !active CPUs...
+	 */
+	if (!cpu_active(this_cpu))
+		return 0;
+
+	/*
+	 * This is OK, because current is on_cpu, which avoids it being picked
+	 * for load-balance and preemption/IRQs are still disabled avoiding
+	 * further scheduler activity on it and we're being very careful to
+	 * re-start the picking loop.
+	 */
+	rq_unpin_lock(this_rq, rf);
+
+	if (this_rq->avg_idle < sysctl_sched_migration_cost ||
+	    !READ_ONCE(this_rq->rd->overload)) {
+
+		rcu_read_lock();
+		sd = rcu_dereference_check_sched_domain(this_rq->sd);
+		if (sd)
+			update_next_balance(sd, &next_balance);
+		rcu_read_unlock();
+
+		nohz_newidle_balance(this_rq);
+
+		goto out;
+	}
+
+	raw_spin_unlock(&this_rq->lock);
+
+	update_blocked_averages(this_cpu);
+	rcu_read_lock();
+	for_each_domain(this_cpu, sd) {
+		int continue_balancing = 1;
+		u64 t0, domain_cost;
+
+		if (this_rq->avg_idle < curr_cost + sd->max_newidle_lb_cost) {
+			update_next_balance(sd, &next_balance);
+			break;
+		}
+
+		if (sd->flags & SD_BALANCE_NEWIDLE) {
+			t0 = sched_clock_cpu(this_cpu);
+
+			pulled_task = load_balance(this_cpu, this_rq,
+						   sd, CPU_NEWLY_IDLE,
+						   &continue_balancing);
+
+			domain_cost = sched_clock_cpu(this_cpu) - t0;
+			if (domain_cost > sd->max_newidle_lb_cost)
+				sd->max_newidle_lb_cost = domain_cost;
+
+			curr_cost += domain_cost;
+		}
+
+		update_next_balance(sd, &next_balance);
+
+		/*
+		 * Stop searching for tasks to pull if there are
+		 * now runnable tasks on this rq.
+		 */
+		if (pulled_task || this_rq->nr_running > 0)
+			break;
+	}
+	rcu_read_unlock();
+
+	raw_spin_lock(&this_rq->lock);
+
+	if (curr_cost > this_rq->max_idle_balance_cost)
+		this_rq->max_idle_balance_cost = curr_cost;
+
+out:
+	/*
+	 * While browsing the domains, we released the rq lock, a task could
+	 * have been enqueued in the meantime. Since we're not going idle,
+	 * pretend we pulled a task.
+	 */
+	if (this_rq->cfs.h_nr_running && !pulled_task)
+		pulled_task = 1;
+
+	/* Move the next balance forward */
+	if (time_after(this_rq->next_balance, next_balance))
+		this_rq->next_balance = next_balance;
+
+	/* Is there a task of a high priority class? */
+	if (this_rq->nr_running != this_rq->cfs.h_nr_running)
+		pulled_task = -1;
+
+	if (pulled_task)
+		this_rq->idle_stamp = 0;
+
+	rq_repin_lock(this_rq, rf);
+
+	return pulled_task;
+}
+
 /*
  * run_rebalance_domains is triggered when needed from the scheduler tick.
  * Also triggered for nohz idle balancing (with nohz_balancing_kick set).
@@ -10988,8 +11194,24 @@ static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
 	update_blocked_averages(this_rq->cpu);
 	rebalance_domains(this_rq, idle);
 }
+
+/*
+ * Trigger the SCHED_SOFTIRQ if it is time to do periodic load balancing.
+ */
+void trigger_load_balance(struct rq *rq)
+{
+	/* Don't need to rebalance while attached to NULL domain */
+	if (unlikely(on_null_domain(rq)))
+		return;
+
+	if (time_after_eq(jiffies, rq->next_balance))
+		raise_softirq(SCHED_SOFTIRQ);
+
+	nohz_balancer_kick(rq);
+}
 #endif
 
+#ifdef CONFIG_CACHY_SCHED
 static int
 idle_try_pull_any(struct cfs_rq *cfs_rq)
 {
@@ -11115,9 +11337,6 @@ active_balance(struct rq *rq)
 		try_pull_higher_HRRN(&rq->cfs);
 }
 
-/*
- * Trigger the SCHED_SOFTIRQ if it is time to do periodic load balancing.
- */
 void trigger_load_balance(struct rq *rq)
 {
 	int pulled = 0;
@@ -11136,6 +11355,7 @@ void trigger_load_balance(struct rq *rq)
 		active_balance(rq);
 	}
 }
+#endif
 
 static void rq_online_fair(struct rq *rq)
 {
