@@ -4008,10 +4008,10 @@ static inline void update_load_avg(struct cfs_rq *cfs_rq, struct sched_entity *s
 #endif
 }
 
+#if !defined(CONFIG_CACHY_SCHED)
 #ifndef CONFIG_64BIT
 static inline u64 cfs_rq_last_update_time(struct cfs_rq *cfs_rq)
 {
-#if !defined(CONFIG_CACHY_SCHED)
 	u64 last_update_time_copy;
 	u64 last_update_time;
 
@@ -4022,13 +4022,13 @@ static inline u64 cfs_rq_last_update_time(struct cfs_rq *cfs_rq)
 	} while (last_update_time != last_update_time_copy);
 
 	return last_update_time;
-#endif
 }
 #else
 static inline u64 cfs_rq_last_update_time(struct cfs_rq *cfs_rq)
 {
 	return cfs_rq->avg.last_update_time;
 }
+#endif
 #endif
 
 /*
