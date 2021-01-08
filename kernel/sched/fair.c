@@ -10892,6 +10892,7 @@ static void pull_from_unlock(struct rq *this_rq,
 	update_rq_clock(this_rq);
 
 	activate_task(this_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(this_rq, p, 0);
 
 	// unlock this rq
 	raw_spin_unlock(&this_rq->lock);
@@ -11301,10 +11302,15 @@ again:
 
 		src_rq = cpu_rq(src_cpu);
 
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
+			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)
+			continue;
+
 		rq_lock_irqsave(src_rq, &src_rf);
 		update_rq_clock(src_rq);
 
-		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head))
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
+			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)
 			goto next;
 
 		p = task_of(src_rq->cfs.head);
@@ -11339,17 +11345,18 @@ active_balance(struct rq *rq)
 
 void trigger_load_balance(struct rq *rq)
 {
-	int pulled = 0;
+	//int pulled = 0;
 
 	/* Don't need to rebalance while attached to NULL domain */
 	if (unlikely(on_null_domain(rq)))
 		return;
 
 	if (rq->idle_balance) {
-		pulled = idle_try_pull_any(&rq->cfs);
+		//pulled = idle_try_pull_any(&rq->cfs);
+		idle_try_pull_any(&rq->cfs);
 
-		if (pulled)
-			resched_curr(rq);
+		//if (pulled)
+			//resched_curr(rq);
 	}
 	else {
 		active_balance(rq);
