@@ -11332,9 +11332,9 @@ active_balance(struct rq *rq)
 	struct cfs_rq *cfs_rq = &rq->cfs;
 
 	if (!cfs_rq->head || cfs_rq->nr_running < 2)
-		try_pull_any(rq);
-	else
 		try_pull_higher_HRRN(&rq->cfs);
+	else
+		try_pull_any(rq);
 }
 
 void trigger_load_balance(struct rq *rq)
