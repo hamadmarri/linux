@@ -11345,21 +11345,24 @@ active_balance(struct rq *rq)
 
 void trigger_load_balance(struct rq *rq)
 {
-	//int pulled = 0;
+	unsigned long interval = 3UL;
 
 	/* Don't need to rebalance while attached to NULL domain */
 	if (unlikely(on_null_domain(rq)))
 		return;
 
-	if (rq->idle_balance) {
-		//pulled = idle_try_pull_any(&rq->cfs);
-		idle_try_pull_any(&rq->cfs);
+	if (time_before(jiffies, rq->next_balance))
+		return;
 
-		//if (pulled)
-			//resched_curr(rq);
+	if (rq->idle_balance) {
+		idle_try_pull_any(&rq->cfs);
 	}
 	else {
 		active_balance(rq);
+
+		/* scale ms to jiffies */
+		interval = msecs_to_jiffies(interval);
+		rq->next_balance = jiffies + interval;
 	}
 }
 #endif
