@@ -589,7 +589,7 @@ static void update_min_vruntime(struct cfs_rq *cfs_rq)
 
 #ifdef CONFIG_CACULE_SCHED
 
-static inline unsigned int
+static unsigned int
 calc_interactivity(u64 now, struct cacule_node *se)
 {
 	u64 l_se, vr_se, sleep_se = 1ULL, u64_factor;
@@ -615,13 +615,28 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	return score_se;
 }
 
+static inline int
+entity_before_cached(u64 now, unsigned int score_curr, struct cacule_node *se)
+{
+	unsigned int score_se;
+	int diff;
+
+	score_se	= calc_interactivity(now, se);
+	diff		= score_se - score_curr;
+
+	if (diff < 0)
+		return 1;
+
+	return -1;
+}
+
 /*
  * Does se have lower interactivity score value (i.e. interactive) than curr? If yes, return 1,
  * otherwise return -1
  * se is before curr if se has lower interactivity score value
  * the lower score, the more interactive
  */
-static int
+static inline int
 entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
 {
 	unsigned int score_curr, score_se;
@@ -4636,19 +4651,24 @@ pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	struct cacule_node *se = cfs_rq->head;
 	struct cacule_node *next;
 	u64 now = sched_clock();
+	unsigned int score_se;
 
 	if (!se)
 		return curr;
 
+	score_se = calc_interactivity(now, se);
+
 	next = se->next;
 	while (next) {
-		if (entity_before(now, se, next) == 1)
+		if (entity_before_cached(now, score_se, next) == 1) {
 			se = next;
+			score_se = calc_interactivity(now, se);
+		}
 
 		next = next->next;
 	}
 
-	if (curr && entity_before(now, se, &curr->cacule_node) == 1)
+	if (curr && entity_before_cached(now, score_se, &curr->cacule_node) == 1)
 		se = &curr->cacule_node;
 
 	return se_of(se);
