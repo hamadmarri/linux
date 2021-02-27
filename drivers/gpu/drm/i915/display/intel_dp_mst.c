@@ -32,10 +32,10 @@
 #include "intel_audio.h"
 #include "intel_connector.h"
 #include "intel_ddi.h"
+#include "intel_display_types.h"
 #include "intel_dp.h"
 #include "intel_dp_mst.h"
 #include "intel_dpio_phy.h"
-#include "intel_drv.h"
 
 static int intel_dp_mst_compute_link_config(struct intel_encoder *encoder,
 					    struct intel_crtc_state *crtc_state,
@@ -346,11 +346,8 @@ static void intel_mst_enable_dp(struct intel_encoder *encoder,
 
 	DRM_DEBUG_KMS("active links %d\n", intel_dp->active_mst_links);
 
-	if (intel_wait_for_register(&dev_priv->uncore,
-				    DP_TP_STATUS(port),
-				    DP_TP_STATUS_ACT_SENT,
-				    DP_TP_STATUS_ACT_SENT,
-				    1))
+	if (intel_de_wait_for_set(dev_priv, DP_TP_STATUS(port),
+				  DP_TP_STATUS_ACT_SENT, 1))
 		DRM_ERROR("Timed out waiting for ACT sent\n");
 
 	drm_dp_check_act_status(&intel_dp->mst_mgr);
@@ -648,23 +645,39 @@ intel_dp_create_fake_mst_encoders(struct intel_digital_port *intel_dig_port)
 }
 
 int
+intel_dp_mst_encoder_active_links(struct intel_digital_port *intel_dig_port)
+{
+	return intel_dig_port->dp.active_mst_links;
+}
+
+int
 intel_dp_mst_encoder_init(struct intel_digital_port *intel_dig_port, int conn_base_id)
 {
+	struct drm_i915_private *i915 = to_i915(intel_dig_port->base.base.dev);
 	struct intel_dp *intel_dp = &intel_dig_port->dp;
-	struct drm_device *dev = intel_dig_port->base.base.dev;
+	enum port port = intel_dig_port->base.port;
 	int ret;
 
-	intel_dp->can_mst = true;
+	if (!HAS_DP_MST(i915) || intel_dp_is_edp(intel_dp))
+		return 0;
+
+	if (INTEL_GEN(i915) < 12 && port == PORT_A)
+		return 0;
+
+	if (INTEL_GEN(i915) < 11 && port == PORT_E)
+		return 0;
+
 	intel_dp->mst_mgr.cbs = &mst_cbs;
 
 	/* create encoders */
 	intel_dp_create_fake_mst_encoders(intel_dig_port);
-	ret = drm_dp_mst_topology_mgr_init(&intel_dp->mst_mgr, dev,
+	ret = drm_dp_mst_topology_mgr_init(&intel_dp->mst_mgr, &i915->drm,
 					   &intel_dp->aux, 16, 3, conn_base_id);
-	if (ret) {
-		intel_dp->can_mst = false;
+	if (ret)
 		return ret;
-	}
+
+	intel_dp->can_mst = true;
+
 	return 0;
 }
 

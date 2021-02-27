@@ -419,6 +419,10 @@ generic_secondary_common_init:
 	/* From now on, r24 is expected to be logical cpuid */
 	mr	r24,r5
 
+	/* Create a temp kernel stack for use before relocation is on.	*/
+	ld	r1,PACAEMERGSP(r13)
+	subi	r1,r1,STACK_FRAME_OVERHEAD
+
 	/* See if we need to call a cpu state restore handler */
 	LOAD_REG_ADDR(r23, cur_cpu_spec)
 	ld	r23,0(r23)
@@ -446,10 +450,6 @@ generic_secondary_common_init:
 
 	sync				/* order paca.run and cur_cpu_spec */
 	isync				/* In case code patching happened */
-
-	/* Create a temp kernel stack for use before relocation is on.	*/
-	ld	r1,PACAEMERGSP(r13)
-	subi	r1,r1,STACK_FRAME_OVERHEAD
 
 	b	__secondary_start
 #endif /* SMP */
@@ -536,6 +536,7 @@ __start_initialization_multiplatform:
 	b	__after_prom_start
 #endif /* CONFIG_PPC_BOOK3E */
 
+__REF
 __boot_from_prom:
 #ifdef CONFIG_PPC_OF_BOOT_TRAMPOLINE
 	/* Save parameters */
@@ -573,6 +574,7 @@ __boot_from_prom:
 	/* We never return. We also hit that trap if trying to boot
 	 * from OF while CONFIG_PPC_OF_BOOT_TRAMPOLINE isn't selected */
 	trap
+	.previous
 
 __after_prom_start:
 #ifdef CONFIG_RELOCATABLE
@@ -976,7 +978,6 @@ start_here_multiplatform:
 	RFI
 	b	.	/* prevent speculative execution */
 
-	.previous
 	/* This is where all platforms converge execution */
 
 start_here_common:
@@ -999,6 +1000,7 @@ start_here_common:
 
 	/* Not reached */
 	BUG_OPCODE
+	.previous
 
 /*
  * We put a few things here that have to be page-aligned.

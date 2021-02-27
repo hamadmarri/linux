@@ -243,7 +243,7 @@ static int check_extent_data_item(struct extent_buffer *leaf,
 }
 
 static int check_csum_item(struct extent_buffer *leaf, struct btrfs_key *key,
-			   int slot)
+			   int slot, struct btrfs_key *prev_key)
 {
 	struct btrfs_fs_info *fs_info = leaf->fs_info;
 	u32 sectorsize = fs_info->sectorsize;
@@ -266,6 +266,20 @@ static int check_csum_item(struct extent_buffer *leaf, struct btrfs_key *key,
 	"unaligned item size for csum item, have %u should be aligned to %u",
 			btrfs_item_size_nr(leaf, slot), csumsize);
 		return -EUCLEAN;
+	}
+	if (slot > 0 && prev_key->type == BTRFS_EXTENT_CSUM_KEY) {
+		u64 prev_csum_end;
+		u32 prev_item_size;
+
+		prev_item_size = btrfs_item_size_nr(leaf, slot - 1);
+		prev_csum_end = (prev_item_size / csumsize) * sectorsize;
+		prev_csum_end += prev_key->offset;
+		if (prev_csum_end > key->offset) {
+			generic_err(leaf, slot - 1,
+"csum end range (%llu) goes beyond the start range (%llu) of the next csum item",
+				    prev_csum_end, key->offset);
+			return -EUCLEAN;
+		}
 	}
 	return 0;
 }
@@ -459,23 +473,23 @@ static int check_block_group_item(struct extent_buffer *leaf,
 
 	read_extent_buffer(leaf, &bgi, btrfs_item_ptr_offset(leaf, slot),
 			   sizeof(bgi));
-	if (btrfs_block_group_chunk_objectid(&bgi) !=
+	if (btrfs_stack_block_group_chunk_objectid(&bgi) !=
 	    BTRFS_FIRST_CHUNK_TREE_OBJECTID) {
 		block_group_err(leaf, slot,
 		"invalid block group chunk objectid, have %llu expect %llu",
-				btrfs_block_group_chunk_objectid(&bgi),
+				btrfs_stack_block_group_chunk_objectid(&bgi),
 				BTRFS_FIRST_CHUNK_TREE_OBJECTID);
 		return -EUCLEAN;
 	}
 
-	if (btrfs_block_group_used(&bgi) > key->offset) {
+	if (btrfs_stack_block_group_used(&bgi) > key->offset) {
 		block_group_err(leaf, slot,
 			"invalid block group used, have %llu expect [0, %llu)",
-				btrfs_block_group_used(&bgi), key->offset);
+				btrfs_stack_block_group_used(&bgi), key->offset);
 		return -EUCLEAN;
 	}
 
-	flags = btrfs_block_group_flags(&bgi);
+	flags = btrfs_stack_block_group_flags(&bgi);
 	if (hweight64(flags & BTRFS_BLOCK_GROUP_PROFILE_MASK) > 1) {
 		block_group_err(leaf, slot,
 "invalid profile flags, have 0x%llx (%lu bits set) expect no more than 1 bit set",
@@ -766,7 +780,7 @@ static int check_inode_item(struct extent_buffer *leaf,
 	/* Note for ROOT_TREE_DIR_ITEM, mkfs could set its transid 0 */
 	if (btrfs_inode_transid(leaf, iitem) > super_gen + 1) {
 		inode_item_err(fs_info, leaf, slot,
-			"invalid inode generation: has %llu expect [0, %llu]",
+			"invalid inode transid: has %llu expect [0, %llu]",
 			       btrfs_inode_transid(leaf, iitem), super_gen + 1);
 		return -EUCLEAN;
 	}
@@ -817,7 +831,7 @@ static int check_root_item(struct extent_buffer *leaf, struct btrfs_key *key,
 			   int slot)
 {
 	struct btrfs_fs_info *fs_info = leaf->fs_info;
-	struct btrfs_root_item ri;
+	struct btrfs_root_item ri = { 0 };
 	const u64 valid_root_flags = BTRFS_ROOT_SUBVOL_RDONLY |
 				     BTRFS_ROOT_SUBVOL_DEAD;
 
@@ -837,14 +851,21 @@ static int check_root_item(struct extent_buffer *leaf, struct btrfs_key *key,
 		return -EUCLEAN;
 	}
 
-	if (btrfs_item_size_nr(leaf, slot) != sizeof(ri)) {
+	if (btrfs_item_size_nr(leaf, slot) != sizeof(ri) &&
+	    btrfs_item_size_nr(leaf, slot) != btrfs_legacy_root_item_size()) {
 		generic_err(leaf, slot,
-			    "invalid root item size, have %u expect %zu",
-			    btrfs_item_size_nr(leaf, slot), sizeof(ri));
+			    "invalid root item size, have %u expect %zu or %u",
+			    btrfs_item_size_nr(leaf, slot), sizeof(ri),
+			    btrfs_legacy_root_item_size());
 	}
 
+	/*
+	 * For legacy root item, the members starting at generation_v2 will be
+	 * all filled with 0.
+	 * And since we allow geneartion_v2 as 0, it will still pass the check.
+	 */
 	read_extent_buffer(leaf, &ri, btrfs_item_ptr_offset(leaf, slot),
-			   sizeof(ri));
+			   btrfs_item_size_nr(leaf, slot));
 
 	/* Generation related */
 	if (btrfs_root_generation(&ri) >
@@ -917,7 +938,7 @@ static int check_leaf_item(struct extent_buffer *leaf,
 		ret = check_extent_data_item(leaf, key, slot, prev_key);
 		break;
 	case BTRFS_EXTENT_CSUM_KEY:
-		ret = check_csum_item(leaf, key, slot);
+		ret = check_csum_item(leaf, key, slot, prev_key);
 		break;
 	case BTRFS_DIR_ITEM_KEY:
 	case BTRFS_DIR_INDEX_KEY:

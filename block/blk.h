@@ -121,6 +121,7 @@ static inline void blk_rq_bio_prep(struct request *rq, struct bio *bio,
 #ifdef CONFIG_BLK_DEV_INTEGRITY
 void blk_flush_integrity(void);
 bool __bio_integrity_endio(struct bio *);
+void bio_integrity_free(struct bio *bio);
 static inline bool bio_integrity_endio(struct bio *bio)
 {
 	if (bio_integrity(bio))
@@ -166,6 +167,9 @@ static inline bool bio_integrity_endio(struct bio *bio)
 {
 	return true;
 }
+static inline void bio_integrity_free(struct bio *bio)
+{
+}
 #endif /* CONFIG_BLK_DEV_INTEGRITY */
 
 unsigned long blk_rq_timeout(unsigned long timeout);
@@ -191,11 +195,11 @@ void blk_account_io_done(struct request *req, u64 now);
 
 void blk_insert_flush(struct request *rq);
 
-int elevator_init_mq(struct request_queue *q);
+void elevator_init_mq(struct request_queue *q);
 int elevator_switch_mq(struct request_queue *q,
 			      struct elevator_type *new_e);
 void __elevator_exit(struct request_queue *, struct elevator_queue *);
-int elv_register_queue(struct request_queue *q);
+int elv_register_queue(struct request_queue *q, bool uevent);
 void elv_unregister_queue(struct request_queue *q);
 
 static inline void elevator_exit(struct request_queue *q,
@@ -267,6 +271,20 @@ static inline void req_set_nomerge(struct request_queue *q, struct request *req)
 static inline unsigned int bio_allowed_max_sectors(struct request_queue *q)
 {
 	return round_down(UINT_MAX, queue_logical_block_size(q)) >> 9;
+}
+
+/*
+ * The max bio size which is aligned to q->limits.discard_granularity. This
+ * is a hint to split large discard bio in generic block layer, then if device
+ * driver needs to split the discard bio into smaller ones, their bi_size can
+ * be very probably and easily aligned to discard_granularity of the device's
+ * queue.
+ */
+static inline unsigned int bio_aligned_discard_max_sectors(
+					struct request_queue *q)
+{
+	return round_down(UINT_MAX, q->limits.discard_granularity) >>
+			SECTOR_SHIFT;
 }
 
 /*

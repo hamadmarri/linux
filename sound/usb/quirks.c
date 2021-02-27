@@ -120,6 +120,40 @@ static int create_standard_audio_quirk(struct snd_usb_audio *chip,
 	return 0;
 }
 
+/* create the audio stream and the corresponding endpoints from the fixed
+ * audioformat object; this is used for quirks with the fixed EPs
+ */
+static int add_audio_stream_from_fixed_fmt(struct snd_usb_audio *chip,
+					   struct audioformat *fp)
+{
+	int stream, err;
+
+	stream = (fp->endpoint & USB_DIR_IN) ?
+		SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
+
+	snd_usb_audioformat_set_sync_ep(chip, fp);
+
+	err = snd_usb_add_audio_stream(chip, stream, fp);
+	if (err < 0)
+		return err;
+
+	err = snd_usb_add_endpoint(chip, fp->endpoint,
+				   SND_USB_ENDPOINT_TYPE_DATA);
+	if (err < 0)
+		return err;
+
+	if (fp->sync_ep) {
+		err = snd_usb_add_endpoint(chip, fp->sync_ep,
+					   fp->implicit_fb ?
+					   SND_USB_ENDPOINT_TYPE_DATA :
+					   SND_USB_ENDPOINT_TYPE_SYNC);
+		if (err < 0)
+			return err;
+	}
+
+	return 0;
+}
+
 /*
  * create a stream for an endpoint/altsetting without proper descriptors
  */
@@ -131,8 +165,8 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 	struct audioformat *fp;
 	struct usb_host_interface *alts;
 	struct usb_interface_descriptor *altsd;
-	int stream, err;
 	unsigned *rate_table = NULL;
+	int err;
 
 	fp = kmemdup(quirk->data, sizeof(*fp), GFP_KERNEL);
 	if (!fp)
@@ -153,11 +187,6 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 		fp->rate_table = rate_table;
 	}
 
-	stream = (fp->endpoint & USB_DIR_IN)
-		? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
-	err = snd_usb_add_audio_stream(chip, stream, fp);
-	if (err < 0)
-		goto error;
 	if (fp->iface != get_iface_desc(&iface->altsetting[0])->bInterfaceNumber ||
 	    fp->altset_idx >= iface->num_altsetting) {
 		err = -EINVAL;
@@ -165,7 +194,7 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 	}
 	alts = &iface->altsetting[fp->altset_idx];
 	altsd = get_iface_desc(alts);
-	if (altsd->bNumEndpoints < 1) {
+	if (altsd->bNumEndpoints <= fp->ep_idx) {
 		err = -EINVAL;
 		goto error;
 	}
@@ -175,10 +204,17 @@ static int create_fixed_stream_quirk(struct snd_usb_audio *chip,
 	if (fp->datainterval == 0)
 		fp->datainterval = snd_usb_parse_datainterval(chip, alts);
 	if (fp->maxpacksize == 0)
-		fp->maxpacksize = le16_to_cpu(get_endpoint(alts, 0)->wMaxPacketSize);
+		fp->maxpacksize = le16_to_cpu(get_endpoint(alts, fp->ep_idx)->wMaxPacketSize);
+	if (!fp->fmt_type)
+		fp->fmt_type = UAC_FORMAT_TYPE_I;
+
+	err = add_audio_stream_from_fixed_fmt(chip, fp);
+	if (err < 0)
+		goto error;
+
 	usb_set_interface(chip->dev, fp->iface, 0);
-	snd_usb_init_pitch(chip, fp->iface, alts, fp);
-	snd_usb_init_sample_rate(chip, fp->iface, alts, fp, fp->rate_max);
+	snd_usb_init_pitch(chip, fp);
+	snd_usb_init_sample_rate(chip, fp, fp->rate_max);
 	return 0;
 
  error:
@@ -417,7 +453,7 @@ static int create_uaxx_quirk(struct snd_usb_audio *chip,
 	struct usb_host_interface *alts;
 	struct usb_interface_descriptor *altsd;
 	struct audioformat *fp;
-	int stream, err;
+	int err;
 
 	/* both PCM and MIDI interfaces have 2 or more altsettings */
 	if (iface->num_altsetting < 2)
@@ -482,9 +518,7 @@ static int create_uaxx_quirk(struct snd_usb_audio *chip,
 		return -ENXIO;
 	}
 
-	stream = (fp->endpoint & USB_DIR_IN)
-		? SNDRV_PCM_STREAM_CAPTURE : SNDRV_PCM_STREAM_PLAYBACK;
-	err = snd_usb_add_audio_stream(chip, stream, fp);
+	err = add_audio_stream_from_fixed_fmt(chip, fp);
 	if (err < 0) {
 		list_del(&fp->list); /* unlink for avoiding double-free */
 		kfree(fp);
@@ -506,6 +540,15 @@ static int create_standard_mixer_quirk(struct snd_usb_audio *chip,
 		return 0;
 
 	return snd_usb_create_mixer(chip, quirk->ifnum, 0);
+}
+
+static int setup_disable_autosuspend(struct snd_usb_audio *chip,
+				       struct usb_interface *iface,
+				       struct usb_driver *driver,
+				       const struct snd_usb_audio_quirk *quirk)
+{
+	driver->supports_autosuspend = 0;
+	return 1;	/* Continue with creating streams and mixer */
 }
 
 /*
@@ -546,6 +589,7 @@ int snd_usb_create_quirk(struct snd_usb_audio *chip,
 		[QUIRK_AUDIO_EDIROL_UAXX] = create_uaxx_quirk,
 		[QUIRK_AUDIO_ALIGN_TRANSFER] = create_align_transfer_quirk,
 		[QUIRK_AUDIO_STANDARD_MIXER] = create_standard_mixer_quirk,
+		[QUIRK_SETUP_DISABLE_AUTOSUSPEND] = setup_disable_autosuspend,
 	};
 
 	if (quirk->type < QUIRK_TYPE_COUNT) {
@@ -1102,20 +1146,27 @@ free_buf:
 	return err;
 }
 
+static int snd_usb_motu_m_series_boot_quirk(struct usb_device *dev)
+{
+	msleep(2000);
+
+	return 0;
+}
+
 /*
  * Setup quirks
  */
 #define MAUDIO_SET		0x01 /* parse device_setup */
 #define MAUDIO_SET_COMPATIBLE	0x80 /* use only "win-compatible" interfaces */
 #define MAUDIO_SET_DTS		0x02 /* enable DTS Digital Output */
-#define MAUDIO_SET_96K		0x04 /* 48-96KHz rate if set, 8-48KHz otherwise */
+#define MAUDIO_SET_96K		0x04 /* 48-96kHz rate if set, 8-48kHz otherwise */
 #define MAUDIO_SET_24B		0x08 /* 24bits sample if set, 16bits otherwise */
 #define MAUDIO_SET_DI		0x10 /* enable Digital Input */
 #define MAUDIO_SET_MASK		0x1f /* bit mask for setup value */
-#define MAUDIO_SET_24B_48K_DI	 0x19 /* 24bits+48KHz+Digital Input */
-#define MAUDIO_SET_24B_48K_NOTDI 0x09 /* 24bits+48KHz+No Digital Input */
-#define MAUDIO_SET_16B_48K_DI	 0x11 /* 16bits+48KHz+Digital Input */
-#define MAUDIO_SET_16B_48K_NOTDI 0x01 /* 16bits+48KHz+No Digital Input */
+#define MAUDIO_SET_24B_48K_DI	 0x19 /* 24bits+48kHz+Digital Input */
+#define MAUDIO_SET_24B_48K_NOTDI 0x09 /* 24bits+48kHz+No Digital Input */
+#define MAUDIO_SET_16B_48K_DI	 0x11 /* 16bits+48kHz+Digital Input */
+#define MAUDIO_SET_16B_48K_NOTDI 0x01 /* 16bits+48kHz+No Digital Input */
 
 static int quattro_skip_setting_quirk(struct snd_usb_audio *chip,
 				      int iface, int altno)
@@ -1216,6 +1267,38 @@ static int fasttrackpro_skip_setting_quirk(struct snd_usb_audio *chip,
 	return 0; /* keep this altsetting */
 }
 
+static int s1810c_skip_setting_quirk(struct snd_usb_audio *chip,
+					   int iface, int altno)
+{
+	/*
+	 * Altno settings:
+	 *
+	 * Playback (Interface 1):
+	 * 1: 6 Analog + 2 S/PDIF
+	 * 2: 6 Analog + 2 S/PDIF
+	 * 3: 6 Analog
+	 *
+	 * Capture (Interface 2):
+	 * 1: 8 Analog + 2 S/PDIF + 8 ADAT
+	 * 2: 8 Analog + 2 S/PDIF + 4 ADAT
+	 * 3: 8 Analog
+	 */
+
+	/*
+	 * I'll leave 2 as the default one and
+	 * use device_setup to switch to the
+	 * other two.
+	 */
+	if ((chip->setup == 0 || chip->setup > 2) && altno != 2)
+		return 1;
+	else if (chip->setup == 1 && altno != 1)
+		return 1;
+	else if (chip->setup == 2 && altno != 3)
+		return 1;
+
+	return 0;
+}
+
 int snd_usb_apply_interface_quirk(struct snd_usb_audio *chip,
 				  int iface,
 				  int altno)
@@ -1229,6 +1312,10 @@ int snd_usb_apply_interface_quirk(struct snd_usb_audio *chip,
 	/* fasttrackpro usb: skip altsets incompatible with device_setup */
 	if (chip->usb_id == USB_ID(0x0763, 0x2012))
 		return fasttrackpro_skip_setting_quirk(chip, iface, altno);
+	/* presonus studio 1810c: skip altsets incompatible with device_setup */
+	if (chip->usb_id == USB_ID(0x0194f, 0x010c))
+		return s1810c_skip_setting_quirk(chip, iface, altno);
+
 
 	return 0;
 }
@@ -1280,7 +1367,28 @@ int snd_usb_apply_boot_quirk(struct usb_device *dev,
 	case USB_ID(0x2466, 0x8010): /* Fractal Audio Axe-Fx 3 */
 		return snd_usb_axefx3_boot_quirk(dev);
 	case USB_ID(0x07fd, 0x0004): /* MOTU MicroBook II */
-		return snd_usb_motu_microbookii_boot_quirk(dev);
+		/*
+		 * For some reason interface 3 with vendor-spec class is
+		 * detected on MicroBook IIc.
+		 */
+		if (get_iface_desc(intf->altsetting)->bInterfaceClass ==
+		    USB_CLASS_VENDOR_SPEC &&
+		    get_iface_desc(intf->altsetting)->bInterfaceNumber < 3)
+			return snd_usb_motu_microbookii_boot_quirk(dev);
+		break;
+	}
+
+	return 0;
+}
+
+int snd_usb_apply_boot_quirk_once(struct usb_device *dev,
+				  struct usb_interface *intf,
+				  const struct snd_usb_audio_quirk *quirk,
+				  unsigned int id)
+{
+	switch (id) {
+	case USB_ID(0x07fd, 0x0008): /* MOTU M Series */
+		return snd_usb_motu_m_series_boot_quirk(dev);
 	}
 
 	return 0;
@@ -1289,7 +1397,8 @@ int snd_usb_apply_boot_quirk(struct usb_device *dev,
 /*
  * check if the device uses big-endian samples
  */
-int snd_usb_is_big_endian_format(struct snd_usb_audio *chip, struct audioformat *fp)
+int snd_usb_is_big_endian_format(struct snd_usb_audio *chip,
+				 const struct audioformat *fp)
 {
 	/* it depends on altsetting whether the device is big-endian or not */
 	switch (chip->usb_id) {
@@ -1328,7 +1437,7 @@ enum {
 };
 
 static void set_format_emu_quirk(struct snd_usb_substream *subs,
-				 struct audioformat *fmt)
+				 const struct audioformat *fmt)
 {
 	unsigned char emu_samplerate_id = 0;
 
@@ -1337,7 +1446,7 @@ static void set_format_emu_quirk(struct snd_usb_substream *subs,
 	 * by playback substream
 	 */
 	if (subs->direction == SNDRV_PCM_STREAM_PLAYBACK) {
-		if (subs->stream->substream[SNDRV_PCM_STREAM_CAPTURE].interface != -1)
+		if (subs->stream->substream[SNDRV_PCM_STREAM_CAPTURE].cur_audiofmt)
 			return;
 	}
 
@@ -1366,7 +1475,7 @@ static void set_format_emu_quirk(struct snd_usb_substream *subs,
 }
 
 void snd_usb_set_format_quirk(struct snd_usb_substream *subs,
-			      struct audioformat *fmt)
+			      const struct audioformat *fmt)
 {
 	switch (subs->stream->chip->usb_id) {
 	case USB_ID(0x041e, 0x3f02): /* E-Mu 0202 USB */
@@ -1375,6 +1484,9 @@ void snd_usb_set_format_quirk(struct snd_usb_substream *subs,
 	case USB_ID(0x041e, 0x3f19): /* E-Mu 0204 USB */
 		set_format_emu_quirk(subs, fmt);
 		break;
+	case USB_ID(0x534d, 0x2109): /* MacroSilicon MS2109 */
+		subs->stream_offset_adj = 2;
+		break;
 	}
 }
 
@@ -1382,21 +1494,23 @@ bool snd_usb_get_sample_rate_quirk(struct snd_usb_audio *chip)
 {
 	/* devices which do not support reading the sample rate. */
 	switch (chip->usb_id) {
-	case USB_ID(0x041E, 0x4080): /* Creative Live Cam VF0610 */
-	case USB_ID(0x04D8, 0xFEEA): /* Benchmark DAC1 Pre */
+	case USB_ID(0x041e, 0x4080): /* Creative Live Cam VF0610 */
+	case USB_ID(0x04d8, 0xfeea): /* Benchmark DAC1 Pre */
 	case USB_ID(0x0556, 0x0014): /* Phoenix Audio TMX320VC */
-	case USB_ID(0x05A3, 0x9420): /* ELP HD USB Camera */
-	case USB_ID(0x074D, 0x3553): /* Outlaw RR2150 (Micronas UAC3553B) */
+	case USB_ID(0x05a3, 0x9420): /* ELP HD USB Camera */
+	case USB_ID(0x05a7, 0x1020): /* Bose Companion 5 */
+	case USB_ID(0x074d, 0x3553): /* Outlaw RR2150 (Micronas UAC3553B) */
 	case USB_ID(0x1395, 0x740a): /* Sennheiser DECT */
 	case USB_ID(0x1901, 0x0191): /* GE B850V3 CP2114 audio interface */
-	case USB_ID(0x21B4, 0x0081): /* AudioQuest DragonFly */
+	case USB_ID(0x21b4, 0x0081): /* AudioQuest DragonFly */
+	case USB_ID(0x2912, 0x30c8): /* Audioengine D1 */
 		return true;
 	}
 
 	/* devices of these vendors don't support reading rate, either */
 	switch (USB_ID_VENDOR(chip->usb_id)) {
-	case 0x045E: /* MS Lifecam */
-	case 0x047F: /* Plantronics */
+	case 0x045e: /* MS Lifecam */
+	case 0x047f: /* Plantronics */
 	case 0x1de7: /* Phoenix Audio */
 		return true;
 	}
@@ -1410,6 +1524,7 @@ bool snd_usb_get_sample_rate_quirk(struct snd_usb_audio *chip)
 static bool is_itf_usb_dsd_dac(unsigned int id)
 {
 	switch (id) {
+	case USB_ID(0x154e, 0x1002): /* Denon DCD-1500RE */
 	case USB_ID(0x154e, 0x1003): /* Denon DA-300USB */
 	case USB_ID(0x154e, 0x3005): /* Marantz HD-DAC1 */
 	case USB_ID(0x154e, 0x3006): /* Marantz SA-14S1 */
@@ -1422,13 +1537,13 @@ static bool is_itf_usb_dsd_dac(unsigned int id)
 	return false;
 }
 
-int snd_usb_select_mode_quirk(struct snd_usb_substream *subs,
-			      struct audioformat *fmt)
+int snd_usb_select_mode_quirk(struct snd_usb_audio *chip,
+			      const struct audioformat *fmt)
 {
-	struct usb_device *dev = subs->dev;
+	struct usb_device *dev = chip->dev;
 	int err;
 
-	if (is_itf_usb_dsd_dac(subs->stream->chip->usb_id)) {
+	if (is_itf_usb_dsd_dac(chip->usb_id)) {
 		/* First switch to alt set 0, otherwise the mode switch cmd
 		 * will not be accepted by the DAC
 		 */
@@ -1474,7 +1589,7 @@ void snd_usb_endpoint_start_quirk(struct snd_usb_endpoint *ep)
 
 	/*
 	 * M-Audio Fast Track C400/C600 - when packets are not skipped, real
-	 * world latency varies by approx. +/- 50 frames (at 96KHz) each time
+	 * world latency varies by approx. +/- 50 frames (at 96kHz) each time
 	 * the stream is (re)started. When skipping packets 16 at endpoint
 	 * start up, the real world latency is stable within +/- 1 frame (also
 	 * across power cycles).
@@ -1491,10 +1606,8 @@ void snd_usb_endpoint_start_quirk(struct snd_usb_endpoint *ep)
 		ep->tenor_fb_quirk = 1;
 }
 
-void snd_usb_set_interface_quirk(struct usb_device *dev)
+void snd_usb_set_interface_quirk(struct snd_usb_audio *chip)
 {
-	struct snd_usb_audio *chip = dev_get_drvdata(&dev->dev);
-
 	if (!chip)
 		return;
 	/*
@@ -1541,15 +1654,25 @@ void snd_usb_ctl_msg_quirk(struct usb_device *dev, unsigned int pipe,
 	    && (requesttype & USB_TYPE_MASK) == USB_TYPE_CLASS)
 		msleep(20);
 
-	/* Zoom R16/24, Logitech H650e, Jabra 550a needs a tiny delay here,
-	 * otherwise requests like get/set frequency return as failed despite
-	 * actually succeeding.
+	/* Zoom R16/24, many Logitech(at least H650e/H570e/BCC950),
+	 * Jabra 550a, Kingston HyperX needs a tiny delay here,
+	 * otherwise requests like get/set frequency return
+	 * as failed despite actually succeeding.
 	 */
 	if ((chip->usb_id == USB_ID(0x1686, 0x00dd) ||
-	     chip->usb_id == USB_ID(0x046d, 0x0a46) ||
-	     chip->usb_id == USB_ID(0x0b0e, 0x0349)) &&
+	     USB_ID_VENDOR(chip->usb_id) == 0x046d  || /* Logitech */
+	     chip->usb_id == USB_ID(0x0b0e, 0x0349) ||
+	     chip->usb_id == USB_ID(0x0951, 0x16ad)) &&
 	    (requesttype & USB_TYPE_MASK) == USB_TYPE_CLASS)
 		usleep_range(1000, 2000);
+
+	/*
+	 * Samsung USBC Headset (AKG) need a tiny delay after each
+	 * class compliant request. (Model number: AAM625R or AAM627R)
+	 */
+	if (chip->usb_id == USB_ID(0x04e8, 0xa051) &&
+	    (requesttype & USB_TYPE_MASK) == USB_TYPE_CLASS)
+		usleep_range(5000, 6000);
 }
 
 /*
@@ -1592,7 +1715,7 @@ u64 snd_usb_interface_dsd_format_quirks(struct snd_usb_audio *chip,
 
 	case USB_ID(0x0d8c, 0x0316): /* Hegel HD12 DSD */
 	case USB_ID(0x10cb, 0x0103): /* The Bit Opus #3; with fp->dsd_raw */
-	case USB_ID(0x16b0, 0x06b2): /* NuPrime DAC-10 */
+	case USB_ID(0x16d0, 0x06b2): /* NuPrime DAC-10 */
 	case USB_ID(0x16d0, 0x09dd): /* Encore mDSD */
 	case USB_ID(0x16d0, 0x0733): /* Furutech ADL Stratos */
 	case USB_ID(0x16d0, 0x09db): /* NuPrime Audio DAC-9 */
@@ -1658,7 +1781,9 @@ u64 snd_usb_interface_dsd_format_quirks(struct snd_usb_audio *chip,
 	case 0x25ce:  /* Mytek devices */
 	case 0x278b:  /* Rotel? */
 	case 0x292b:  /* Gustard/Ess based devices */
+	case 0x2972:  /* FiiO devices */
 	case 0x2ab6:  /* T+A devices */
+	case 0x3353:  /* Khadas devices */
 	case 0x3842:  /* EVGA */
 	case 0xc502:  /* HiBy devices */
 		if (fp->dsd_raw)
@@ -1703,5 +1828,49 @@ void snd_usb_audioformat_attributes_quirk(struct snd_usb_audio *chip,
 		else
 			fp->ep_attr |= USB_ENDPOINT_SYNC_SYNC;
 		break;
+	case USB_ID(0x07fd, 0x0004):  /* MOTU MicroBook IIc */
+		/*
+		 * MaxPacketsOnly attribute is erroneously set in endpoint
+		 * descriptors. As a result this card produces noise with
+		 * all sample rates other than 96 kHz.
+		 */
+		fp->attributes &= ~UAC_EP_CS_ATTR_FILL_MAX;
+		break;
 	}
+}
+
+/*
+ * registration quirk:
+ * the registration is skipped if a device matches with the given ID,
+ * unless the interface reaches to the defined one.  This is for delaying
+ * the registration until the last known interface, so that the card and
+ * devices appear at the same time.
+ */
+
+struct registration_quirk {
+	unsigned int usb_id;	/* composed via USB_ID() */
+	unsigned int interface;	/* the interface to trigger register */
+};
+
+#define REG_QUIRK_ENTRY(vendor, product, iface) \
+	{ .usb_id = USB_ID(vendor, product), .interface = (iface) }
+
+static const struct registration_quirk registration_quirks[] = {
+	REG_QUIRK_ENTRY(0x0951, 0x16d8, 2),	/* Kingston HyperX AMP */
+	REG_QUIRK_ENTRY(0x0951, 0x16ed, 2),	/* Kingston HyperX Cloud Alpha S */
+	REG_QUIRK_ENTRY(0x0951, 0x16ea, 2),	/* Kingston HyperX Cloud Flight S */
+	{ 0 }					/* terminator */
+};
+
+/* return true if skipping registration */
+bool snd_usb_registration_quirk(struct snd_usb_audio *chip, int iface)
+{
+	const struct registration_quirk *q;
+
+	for (q = registration_quirks; q->usb_id; q++)
+		if (chip->usb_id == q->usb_id)
+			return iface != q->interface;
+
+	/* Register as normal */
+	return false;
 }

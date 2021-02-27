@@ -6,19 +6,22 @@
 char _license[] SEC("license") = "GPL";
 __u32 _version SEC("version") = 1;
 
+#ifndef PAGE_SIZE
+#define PAGE_SIZE 4096
+#endif
+
 #define SOL_CUSTOM			0xdeadbeef
 
 struct sockopt_sk {
 	__u8 val;
 };
 
-struct bpf_map_def SEC("maps") socket_storage_map = {
-	.type = BPF_MAP_TYPE_SK_STORAGE,
-	.key_size = sizeof(int),
-	.value_size = sizeof(struct sockopt_sk),
-	.map_flags = BPF_F_NO_PREALLOC,
-};
-BPF_ANNOTATE_KV_PAIR(socket_storage_map, int, struct sockopt_sk);
+struct {
+	__uint(type, BPF_MAP_TYPE_SK_STORAGE);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, int);
+	__type(value, struct sockopt_sk);
+} socket_storage_map SEC(".maps");
 
 SEC("cgroup/getsockopt")
 int _getsockopt(struct bpf_sockopt *ctx)
@@ -27,18 +30,40 @@ int _getsockopt(struct bpf_sockopt *ctx)
 	__u8 *optval = ctx->optval;
 	struct sockopt_sk *storage;
 
-	if (ctx->level == SOL_IP && ctx->optname == IP_TOS)
+	if (ctx->level == SOL_IP && ctx->optname == IP_TOS) {
 		/* Not interested in SOL_IP:IP_TOS;
 		 * let next BPF program in the cgroup chain or kernel
 		 * handle it.
 		 */
+		ctx->optlen = 0; /* bypass optval>PAGE_SIZE */
 		return 1;
+	}
 
 	if (ctx->level == SOL_SOCKET && ctx->optname == SO_SNDBUF) {
 		/* Not interested in SOL_SOCKET:SO_SNDBUF;
 		 * let next BPF program in the cgroup chain or kernel
 		 * handle it.
 		 */
+		return 1;
+	}
+
+	if (ctx->level == SOL_IP && ctx->optname == IP_FREEBIND) {
+		if (optval + 1 > optval_end)
+			return 0; /* EPERM, bounds check */
+
+		ctx->retval = 0; /* Reset system call return value to zero */
+
+		/* Always export 0x55 */
+		optval[0] = 0x55;
+		ctx->optlen = 1;
+
+		/* Userspace buffer is PAGE_SIZE * 2, but BPF
+		 * program can only see the first PAGE_SIZE
+		 * bytes of data.
+		 */
+		if (optval_end - optval != PAGE_SIZE)
+			return 0; /* EPERM, unexpected data size */
+
 		return 1;
 	}
 
@@ -72,12 +97,14 @@ int _setsockopt(struct bpf_sockopt *ctx)
 	__u8 *optval = ctx->optval;
 	struct sockopt_sk *storage;
 
-	if (ctx->level == SOL_IP && ctx->optname == IP_TOS)
+	if (ctx->level == SOL_IP && ctx->optname == IP_TOS) {
 		/* Not interested in SOL_IP:IP_TOS;
 		 * let next BPF program in the cgroup chain or kernel
 		 * handle it.
 		 */
+		ctx->optlen = 0; /* bypass optval>PAGE_SIZE */
 		return 1;
+	}
 
 	if (ctx->level == SOL_SOCKET && ctx->optname == SO_SNDBUF) {
 		/* Overwrite SO_SNDBUF value */
@@ -87,6 +114,28 @@ int _setsockopt(struct bpf_sockopt *ctx)
 
 		*(__u32 *)optval = 0x55AA;
 		ctx->optlen = 4;
+
+		return 1;
+	}
+
+	if (ctx->level == SOL_IP && ctx->optname == IP_FREEBIND) {
+		/* Original optlen is larger than PAGE_SIZE. */
+		if (ctx->optlen != PAGE_SIZE * 2)
+			return 0; /* EPERM, unexpected data size */
+
+		if (optval + 1 > optval_end)
+			return 0; /* EPERM, bounds check */
+
+		/* Make sure we can trim the buffer. */
+		optval[0] = 0;
+		ctx->optlen = 1;
+
+		/* Usepace buffer is PAGE_SIZE * 2, but BPF
+		 * program can only see the first PAGE_SIZE
+		 * bytes of data.
+		 */
+		if (optval_end - optval != PAGE_SIZE)
+			return 0; /* EPERM, unexpected data size */
 
 		return 1;
 	}

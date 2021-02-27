@@ -51,11 +51,11 @@ static void assert_priolists(struct intel_engine_execlists * const execlists)
 	GEM_BUG_ON(rb_first_cached(&execlists->queue) !=
 		   rb_first(&execlists->queue.rb_root));
 
-	last_prio = (INT_MAX >> I915_USER_PRIORITY_SHIFT) + 1;
+	last_prio = INT_MAX;
 	for (rb = rb_first_cached(&execlists->queue); rb; rb = rb_next(rb)) {
 		const struct i915_priolist *p = to_priolist(rb);
 
-		GEM_BUG_ON(p->priority >= last_prio);
+		GEM_BUG_ON(p->priority > last_prio);
 		last_prio = p->priority;
 
 		GEM_BUG_ON(!p->used);
@@ -174,13 +174,40 @@ sched_lock_engine(const struct i915_sched_node *node,
 
 static inline int rq_prio(const struct i915_request *rq)
 {
-	return rq->sched.attr.priority | __NO_PREEMPTION;
+	return rq->sched.attr.priority;
 }
 
-static void kick_submission(struct intel_engine_cs *engine, int prio)
+static inline bool need_preempt(int prio, int active)
 {
-	const struct i915_request *inflight =
-		port_request(engine->execlists.port);
+	/*
+	 * Allow preemption of low -> normal -> high, but we do
+	 * not allow low priority tasks to preempt other low priority
+	 * tasks under the impression that latency for low priority
+	 * tasks does not matter (as much as background throughput),
+	 * so kiss.
+	 */
+	return prio >= max(I915_PRIORITY_NORMAL, active);
+}
+
+static void kick_submission(struct intel_engine_cs *engine,
+			    const struct i915_request *rq,
+			    int prio)
+{
+	const struct i915_request *inflight;
+
+	/*
+	 * We only need to kick the tasklet once for the high priority
+	 * new context we add into the queue.
+	 */
+	if (prio <= engine->execlists.queue_priority_hint)
+		return;
+
+	rcu_read_lock();
+
+	/* Nothing currently active? We're overdue for a submission! */
+	inflight = execlists_active(&engine->execlists);
+	if (!inflight)
+		goto unlock;
 
 	/*
 	 * If we are already the currently executing context, don't
@@ -189,10 +216,15 @@ static void kick_submission(struct intel_engine_cs *engine, int prio)
 	 * tasklet, i.e. we have not change the priority queue
 	 * sufficiently to oust the running context.
 	 */
-	if (!inflight || !i915_scheduler_need_preempt(prio, rq_prio(inflight)))
-		return;
+	if (inflight->hw_context == rq->hw_context)
+		goto unlock;
 
-	tasklet_hi_schedule(&engine->execlists.tasklet);
+	engine->execlists.queue_priority_hint = prio;
+	if (need_preempt(prio, rq_prio(inflight)))
+		tasklet_hi_schedule(&engine->execlists.tasklet);
+
+unlock:
+	rcu_read_unlock();
 }
 
 static void __i915_schedule(struct i915_sched_node *node,
@@ -297,20 +329,18 @@ static void __i915_schedule(struct i915_sched_node *node,
 
 		node->attr.priority = prio;
 
-		if (list_empty(&node->link)) {
-			/*
-			 * If the request is not in the priolist queue because
-			 * it is not yet runnable, then it doesn't contribute
-			 * to our preemption decisions. On the other hand,
-			 * if the request is on the HW, it too is not in the
-			 * queue; but in that case we may still need to reorder
-			 * the inflight requests.
-			 */
+		/*
+		 * Once the request is ready, it will be placed into the
+		 * priority lists and then onto the HW runlist. Before the
+		 * request is ready, it does not contribute to our preemption
+		 * decisions and we can safely ignore it, as it will, and
+		 * any preemption required, be dealt with upon submission.
+		 * See engine->submit_request()
+		 */
+		if (list_empty(&node->link))
 			continue;
-		}
 
-		if (!intel_engine_is_virtual(engine) &&
-		    !i915_request_is_active(node_to_request(node))) {
+		if (i915_request_in_priority_queue(node_to_request(node))) {
 			if (!cache.priolist)
 				cache.priolist =
 					i915_sched_lookup_priolist(engine,
@@ -318,13 +348,8 @@ static void __i915_schedule(struct i915_sched_node *node,
 			list_move_tail(&node->link, cache.priolist);
 		}
 
-		if (prio <= engine->execlists.queue_priority_hint)
-			continue;
-
-		engine->execlists.queue_priority_hint = prio;
-
 		/* Defer (tasklet) submission until after all of our updates. */
-		kick_submission(engine, prio);
+		kick_submission(engine, node_to_request(node), prio);
 	}
 
 	spin_unlock(&engine->active.lock);
@@ -350,8 +375,7 @@ void i915_schedule_bump_priority(struct i915_request *rq, unsigned int bump)
 	unsigned long flags;
 
 	GEM_BUG_ON(bump & ~I915_PRIORITY_MASK);
-
-	if (READ_ONCE(rq->sched.attr.priority) == I915_PRIORITY_INVALID)
+	if (READ_ONCE(rq->sched.attr.priority) & bump)
 		return;
 
 	spin_lock_irqsave(&schedule_lock, flags);
@@ -392,26 +416,16 @@ bool __i915_sched_node_add_dependency(struct i915_sched_node *node,
 
 	if (!node_signaled(signal)) {
 		INIT_LIST_HEAD(&dep->dfs_link);
-		list_add(&dep->wait_link, &signal->waiters_list);
-		list_add(&dep->signal_link, &node->signalers_list);
 		dep->signaler = signal;
+		dep->waiter = node;
 		dep->flags = flags;
 
-		/* Keep track of whether anyone on this chain has a semaphore */
-		if (signal->flags & I915_SCHED_HAS_SEMAPHORE_CHAIN &&
-		    !node_started(signal))
-			node->flags |= I915_SCHED_HAS_SEMAPHORE_CHAIN;
+		/* All set, now publish. Beware the lockless walkers. */
+		list_add(&dep->signal_link, &node->signalers_list);
+		list_add_rcu(&dep->wait_link, &signal->waiters_list);
 
-		/*
-		 * As we do not allow WAIT to preempt inflight requests,
-		 * once we have executed a request, along with triggering
-		 * any execution callbacks, we must preserve its ordering
-		 * within the non-preemptible FIFO.
-		 */
-		BUILD_BUG_ON(__NO_PREEMPTION & ~I915_PRIORITY_MASK);
-		if (flags & I915_DEPENDENCY_EXTERNAL)
-			__bump_priority(signal, __NO_PREEMPTION);
-
+		/* Propagate the chains */
+		node->flags |= signal->flags;
 		ret = true;
 	}
 
@@ -450,7 +464,6 @@ void i915_sched_node_fini(struct i915_sched_node *node)
 	 * so we may be called out-of-order.
 	 */
 	list_for_each_entry_safe(dep, tmp, &node->signalers_list, signal_link) {
-		GEM_BUG_ON(!node_signaled(dep->signaler));
 		GEM_BUG_ON(!list_empty(&dep->dfs_link));
 
 		list_del(&dep->wait_link);

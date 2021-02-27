@@ -39,21 +39,50 @@ struct nvdimm {
 	const char *dimm_id;
 	struct {
 		const struct nvdimm_security_ops *ops;
+#ifndef __GENKSYMS__
+		unsigned long flags;
+		unsigned long ext_flags;
+#else
 		enum nvdimm_security_state state;
 		enum nvdimm_security_state ext_state;
+#endif
 		unsigned int overwrite_tmo;
 		struct kernfs_node *overwrite_state;
 	} sec;
 	struct delayed_work dwork;
 };
 
-static inline enum nvdimm_security_state nvdimm_security_state(
+static inline unsigned long nvdimm_security_flags(
 		struct nvdimm *nvdimm, enum nvdimm_passphrase_type ptype)
 {
-	if (!nvdimm->sec.ops)
-		return -ENXIO;
+	u64 flags;
+	const u64 state_flags = 1UL << NVDIMM_SECURITY_DISABLED
+		| 1UL << NVDIMM_SECURITY_LOCKED
+		| 1UL << NVDIMM_SECURITY_UNLOCKED
+		| 1UL << NVDIMM_SECURITY_OVERWRITE;
 
-	return nvdimm->sec.ops->state(nvdimm, ptype);
+	if (!nvdimm->sec.ops)
+		return 0;
+
+	flags = nvdimm->sec.ops->get_flags(nvdimm, ptype);
+	/*
+	 * The old function returns 0 for disabled and < 0 for error.
+	 * The new function returns 0 for error and has disabled flag.
+	 * This interprets unsupported security state as disabled. The
+	 * specification states that the device should abort all security
+	 * related commands in this case.
+	 */
+	if (flags & (1 << 31)) /* 32bit sign */
+		flags = 0;
+	/* Convert old enum value into flags */
+	flags &= UINT_MAX;
+	if (flags < (1 << NVDIMM_SECURITY_DISABLED))
+		flags = 1 << (flags + NVDIMM_SECURITY_DISABLED);
+	/* disabled, locked, unlocked, and overwrite are mutually exclusive */
+	dev_WARN_ONCE(&nvdimm->dev, hweight64(flags & state_flags) > 1,
+			"reported invalid security state: %#llx\n",
+			(unsigned long long) flags);
+	return flags;
 }
 int nvdimm_security_freeze(struct nvdimm *nvdimm);
 #if IS_ENABLED(CONFIG_NVDIMM_KEYS)
@@ -127,14 +156,12 @@ struct nvdimm_bus *walk_to_nvdimm_bus(struct device *nd_dev);
 int __init nvdimm_bus_init(void);
 void nvdimm_bus_exit(void);
 void nvdimm_devs_exit(void);
-void nd_region_devs_exit(void);
-void nd_region_probe_success(struct nvdimm_bus *nvdimm_bus, struct device *dev);
 struct nd_region;
+void nd_region_advance_seeds(struct nd_region *nd_region, struct device *dev);
 void nd_region_create_ns_seed(struct nd_region *nd_region);
 void nd_region_create_btt_seed(struct nd_region *nd_region);
 void nd_region_create_pfn_seed(struct nd_region *nd_region);
 void nd_region_create_dax_seed(struct nd_region *nd_region);
-void nd_region_disable(struct nvdimm_bus *nvdimm_bus, struct device *dev);
 int nvdimm_bus_create_ndctl(struct nvdimm_bus *nvdimm_bus);
 void nvdimm_bus_destroy_ndctl(struct nvdimm_bus *nvdimm_bus);
 void nd_synchronize(void);
@@ -184,6 +211,23 @@ ssize_t nd_namespace_store(struct device *dev,
 		size_t len);
 struct nd_pfn *to_nd_pfn_safe(struct device *dev);
 bool is_nvdimm_bus(struct device *dev);
+
+#if IS_ENABLED(CONFIG_ND_CLAIM)
+int devm_nsio_enable(struct device *dev, struct nd_namespace_io *nsio,
+		resource_size_t size);
+void devm_nsio_disable(struct device *dev, struct nd_namespace_io *nsio);
+#else
+static inline int devm_nsio_enable(struct device *dev,
+		struct nd_namespace_io *nsio, resource_size_t size)
+{
+	return -ENXIO;
+}
+
+static inline void devm_nsio_disable(struct device *dev,
+		struct nd_namespace_io *nsio)
+{
+}
+#endif
 
 #ifdef CONFIG_PROVE_LOCKING
 extern struct class *nd_class;

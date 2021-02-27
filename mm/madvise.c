@@ -308,9 +308,9 @@ static long madvise_willneed(struct vm_area_struct *vma,
 	 */
 	*prev = NULL;	/* tell sys_madvise we drop mmap_sem */
 	get_file(file);
-	up_read(&current->mm->mmap_sem);
 	offset = (loff_t)(start - vma->vm_start)
 			+ ((loff_t)vma->vm_pgoff << PAGE_SHIFT);
+	up_read(&current->mm->mmap_sem);
 	vfs_fadvise(file, offset, end - start, POSIX_FADV_WILLNEED);
 	fput(file);
 	down_read(&current->mm->mmap_sem);
@@ -636,13 +636,13 @@ static int madvise_inject_error(int behavior,
 {
 	struct page *page;
 	struct zone *zone;
-	unsigned int order;
+	unsigned long size;
 
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
 
 
-	for (; start < end; start += PAGE_SIZE << order) {
+	for (; start < end; start += size) {
 		unsigned long pfn;
 		int ret;
 
@@ -654,9 +654,9 @@ static int madvise_inject_error(int behavior,
 		/*
 		 * When soft offlining hugepages, after migrating the page
 		 * we dissolve it, therefore in the second loop "page" will
-		 * no longer be a compound page, and order will be 0.
+		 * no longer be a compound page.
 		 */
-		order = compound_order(compound_head(page));
+		size = page_size(compound_head(page));
 
 		if (PageHWPoison(page)) {
 			put_page(page);
@@ -667,7 +667,7 @@ static int madvise_inject_error(int behavior,
 			pr_info("Soft offlining pfn %#lx at process virtual address %#lx\n",
 					pfn, start);
 
-			ret = soft_offline_page(page, MF_COUNT_INCREASED);
+			ret = soft_offline_page(pfn, MF_COUNT_INCREASED);
 			if (ret)
 				return ret;
 			continue;
@@ -675,15 +675,7 @@ static int madvise_inject_error(int behavior,
 
 		pr_info("Injecting memory failure for pfn %#lx at process virtual address %#lx\n",
 				pfn, start);
-
-		/*
-		 * Drop the page reference taken by get_user_pages_fast(). In
-		 * the absence of MF_COUNT_INCREASED the memory_failure()
-		 * routine is responsible for pinning the page to prevent it
-		 * from being released back to the page allocator.
-		 */
-		put_page(page);
-		ret = memory_failure(pfn, 0);
+		ret = memory_failure(pfn, MF_COUNT_INCREASED);
 		if (ret)
 			return ret;
 	}

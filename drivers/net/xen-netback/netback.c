@@ -136,12 +136,12 @@ static inline struct xenvif_queue *ubuf_to_queue(const struct ubuf_info *ubuf)
 
 static u16 frag_get_pending_idx(skb_frag_t *frag)
 {
-	return (u16)frag->page_offset;
+	return (u16)skb_frag_off(frag);
 }
 
 static void frag_set_pending_idx(skb_frag_t *frag, u16 pending_idx)
 {
-	frag->page_offset = pending_idx;
+	skb_frag_off_set(frag, pending_idx);
 }
 
 static inline pending_ring_idx_t pending_index(unsigned i)
@@ -162,6 +162,10 @@ void xenvif_napi_schedule_or_enable_events(struct xenvif_queue *queue)
 
 	if (more_to_do)
 		napi_schedule(&queue->napi);
+	else if (atomic_fetch_andnot(NETBK_TX_EOI | NETBK_COMMON_EOI,
+				     &queue->eoi_pending) &
+		 (NETBK_TX_EOI | NETBK_COMMON_EOI))
+		xen_irq_lateeoi(queue->tx_irq, 0);
 }
 
 static void tx_add_credit(struct xenvif_queue *queue)
@@ -1057,7 +1061,7 @@ static int xenvif_handle_frag_list(struct xenvif_queue *queue, struct sk_buff *s
 			int j;
 			skb->truesize += skb->data_len;
 			for (j = 0; j < i; j++)
-				put_page(frags[j].page.p);
+				put_page(skb_frag_page(&frags[j]));
 			return -ENOMEM;
 		}
 
@@ -1069,8 +1073,8 @@ static int xenvif_handle_frag_list(struct xenvif_queue *queue, struct sk_buff *s
 			BUG();
 
 		offset += len;
-		frags[i].page.p = page;
-		frags[i].page_offset = 0;
+		__skb_frag_set_page(&frags[i], page);
+		skb_frag_off_set(&frags[i], 0);
 		skb_frag_size_set(&frags[i], len);
 	}
 
@@ -1622,9 +1626,14 @@ static bool xenvif_ctrl_work_todo(struct xenvif *vif)
 irqreturn_t xenvif_ctrl_irq_fn(int irq, void *data)
 {
 	struct xenvif *vif = data;
+	unsigned int eoi_flag = XEN_EOI_FLAG_SPURIOUS;
 
-	while (xenvif_ctrl_work_todo(vif))
+	while (xenvif_ctrl_work_todo(vif)) {
 		xenvif_ctrl_action(vif);
+		eoi_flag = 0;
+	}
+
+	xen_irq_lateeoi(irq, eoi_flag);
 
 	return IRQ_HANDLED;
 }

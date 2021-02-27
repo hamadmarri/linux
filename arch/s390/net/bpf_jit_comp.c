@@ -46,7 +46,6 @@ struct bpf_jit {
 	int r1_thunk_ip;	/* Address of expoline thunk for 'br %r1' */
 	int r14_thunk_ip;	/* Address of expoline thunk for 'br %r14' */
 	int tail_call_start;	/* Tail call start offset */
-	int labels[1];		/* Labels for local jumps */
 };
 
 #define BPF_SIZE_MAX	0xffff	/* Max size for program (16 bit branches) */
@@ -191,6 +190,12 @@ static inline void reg_set_seen(struct bpf_jit *jit, u32 b1)
 	_EMIT4(op | __pcrel);					\
 })
 
+#define EMIT4_PCREL_RIC(op, mask, target)			\
+({								\
+	int __rel = ((target) - jit->prg) / 2;			\
+	_EMIT4((op) | (mask) << 20 | (__rel & 0xffff));		\
+})
+
 #define _EMIT6(op1, op2)					\
 ({								\
 	if (jit->prg_buf) {					\
@@ -223,18 +228,18 @@ static inline void reg_set_seen(struct bpf_jit *jit, u32 b1)
 	REG_SET_SEEN(b3);					\
 })
 
-#define EMIT6_PCREL_LABEL(op1, op2, b1, b2, label, mask)	\
+#define EMIT6_PCREL_RIEB(op1, op2, b1, b2, mask, target)	\
 ({								\
-	int rel = (jit->labels[label] - jit->prg) >> 1;		\
+	unsigned int rel = (int)((target) - jit->prg) / 2;	\
 	_EMIT6(op1 | reg(b1, b2) << 16 | (rel & 0xffff),	\
 	       op2 | mask << 12);				\
 	REG_SET_SEEN(b1);					\
 	REG_SET_SEEN(b2);					\
 })
 
-#define EMIT6_PCREL_IMM_LABEL(op1, op2, b1, imm, label, mask)	\
+#define EMIT6_PCREL_RIEC(op1, op2, b1, imm, mask, target)	\
 ({								\
-	int rel = (jit->labels[label] - jit->prg) >> 1;		\
+	unsigned int rel = (int)((target) - jit->prg) / 2;	\
 	_EMIT6(op1 | (reg_high(b1) | mask) << 16 |		\
 		(rel & 0xffff), op2 | (imm & 0xff) << 8);	\
 	REG_SET_SEEN(b1);					\
@@ -502,7 +507,8 @@ static void bpf_jit_epilogue(struct bpf_jit *jit, u32 stack_depth)
  * NOTE: Use noinline because for gcov (-fprofile-arcs) gcc allocates a lot of
  * stack space for the large switch statement.
  */
-static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp, int i)
+static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp,
+				 int i, u32 stack_depth)
 {
 	struct bpf_insn *insn = &fp->insnsi[i];
 	int jmp_off, last, insn_count = 1;
@@ -1032,7 +1038,9 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp, int i
 		EMIT4(0xb9040000, BPF_REG_0, REG_2);
 		break;
 	}
-	case BPF_JMP | BPF_TAIL_CALL:
+	case BPF_JMP | BPF_TAIL_CALL: {
+		int patch_1_clrj, patch_2_clij, patch_3_brc;
+
 		/*
 		 * Implicit input:
 		 *  B1: pointer to ctx
@@ -1049,9 +1057,11 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp, int i
 		/* llgf %w1,map.max_entries(%b2) */
 		EMIT6_DISP_LH(0xe3000000, 0x0016, REG_W1, REG_0, BPF_REG_2,
 			      offsetof(struct bpf_array, map.max_entries));
-		/* clrj %b3,%w1,0xa,label0: if (u32)%b3 >= (u32)%w1 goto out */
-		EMIT6_PCREL_LABEL(0xec000000, 0x0077, BPF_REG_3,
-				  REG_W1, 0, 0xa);
+		/* if ((u32)%b3 >= (u32)%w1) goto out; */
+		/* clrj %b3,%w1,0xa,out */
+		patch_1_clrj = jit->prg;
+		EMIT6_PCREL_RIEB(0xec000000, 0x0077, BPF_REG_3, REG_W1, 0xa,
+				 jit->prg);
 
 		/*
 		 * if (tail_call_cnt++ > MAX_TAIL_CALL_CNT)
@@ -1059,16 +1069,17 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp, int i
 		 */
 
 		if (jit->seen & SEEN_STACK)
-			off = STK_OFF_TCCNT + STK_OFF + fp->aux->stack_depth;
+			off = STK_OFF_TCCNT + STK_OFF + stack_depth;
 		else
 			off = STK_OFF_TCCNT;
 		/* lhi %w0,1 */
 		EMIT4_IMM(0xa7080000, REG_W0, 1);
 		/* laal %w1,%w0,off(%r15) */
 		EMIT6_DISP_LH(0xeb000000, 0x00fa, REG_W1, REG_W0, REG_15, off);
-		/* clij %w1,MAX_TAIL_CALL_CNT,0x2,label0 */
-		EMIT6_PCREL_IMM_LABEL(0xec000000, 0x007f, REG_W1,
-				      MAX_TAIL_CALL_CNT, 0, 0x2);
+		/* clij %w1,MAX_TAIL_CALL_CNT,0x2,out */
+		patch_2_clij = jit->prg;
+		EMIT6_PCREL_RIEC(0xec000000, 0x007f, REG_W1, MAX_TAIL_CALL_CNT,
+				 2, jit->prg);
 
 		/*
 		 * prog = array->ptrs[index];
@@ -1080,16 +1091,17 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp, int i
 		EMIT4(0xb9160000, REG_1, BPF_REG_3);
 		/* sllg %r1,%r1,3: %r1 *= 8 */
 		EMIT6_DISP_LH(0xeb000000, 0x000d, REG_1, REG_1, REG_0, 3);
-		/* lg %r1,prog(%b2,%r1) */
-		EMIT6_DISP_LH(0xe3000000, 0x0004, REG_1, BPF_REG_2,
+		/* ltg %r1,prog(%b2,%r1) */
+		EMIT6_DISP_LH(0xe3000000, 0x0002, REG_1, BPF_REG_2,
 			      REG_1, offsetof(struct bpf_array, ptrs));
-		/* clgij %r1,0,0x8,label0 */
-		EMIT6_PCREL_IMM_LABEL(0xec000000, 0x007d, REG_1, 0, 0, 0x8);
+		/* brc 0x8,out */
+		patch_3_brc = jit->prg;
+		EMIT4_PCREL_RIC(0xa7040000, 8, jit->prg);
 
 		/*
 		 * Restore registers before calling function
 		 */
-		save_restore_regs(jit, REGS_RESTORE, fp->aux->stack_depth);
+		save_restore_regs(jit, REGS_RESTORE, stack_depth);
 
 		/*
 		 * goto *(prog->bpf_func + tail_call_start);
@@ -1101,8 +1113,16 @@ static noinline int bpf_jit_insn(struct bpf_jit *jit, struct bpf_prog *fp, int i
 		/* bc 0xf,tail_call_start(%r1) */
 		_EMIT4(0x47f01000 + jit->tail_call_start);
 		/* out: */
-		jit->labels[0] = jit->prg;
+		if (jit->prg_buf) {
+			*(u16 *)(jit->prg_buf + patch_1_clrj + 2) =
+				(jit->prg - patch_1_clrj) >> 1;
+			*(u16 *)(jit->prg_buf + patch_2_clij + 2) =
+				(jit->prg - patch_2_clij) >> 1;
+			*(u16 *)(jit->prg_buf + patch_3_brc + 2) =
+				(jit->prg - patch_3_brc) >> 1;
+		}
 		break;
+	}
 	case BPF_JMP | BPF_EXIT: /* return b0 */
 		last = (i == fp->len - 1) ? 1 : 0;
 		if (last && !(jit->seen & SEEN_RET0))
@@ -1283,22 +1303,23 @@ branch_oc:
 /*
  * Compile eBPF program into s390x code
  */
-static int bpf_jit_prog(struct bpf_jit *jit, struct bpf_prog *fp)
+static int bpf_jit_prog(struct bpf_jit *jit, struct bpf_prog *fp,
+			u32 stack_depth)
 {
 	int i, insn_count;
 
 	jit->lit = jit->lit_start;
 	jit->prg = 0;
 
-	bpf_jit_prologue(jit, fp->aux->stack_depth);
+	bpf_jit_prologue(jit, stack_depth);
 	for (i = 0; i < fp->len; i += insn_count) {
-		insn_count = bpf_jit_insn(jit, fp, i);
+		insn_count = bpf_jit_insn(jit, fp, i, stack_depth);
 		if (insn_count < 0)
 			return -1;
 		/* Next instruction address */
 		jit->addrs[i + insn_count] = jit->prg;
 	}
-	bpf_jit_epilogue(jit, fp->aux->stack_depth);
+	bpf_jit_epilogue(jit, stack_depth);
 
 	jit->lit_start = jit->prg;
 	jit->size = jit->lit;
@@ -1316,6 +1337,7 @@ bool bpf_jit_needs_zext(void)
  */
 struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 {
+	u32 stack_depth = round_up(fp->aux->stack_depth, 8);
 	struct bpf_prog *tmp, *orig_fp = fp;
 	struct bpf_binary_header *header;
 	bool tmp_blinded = false;
@@ -1349,7 +1371,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 	 *   - 3:   Calculate program size and addrs arrray
 	 */
 	for (pass = 1; pass <= 3; pass++) {
-		if (bpf_jit_prog(&jit, fp)) {
+		if (bpf_jit_prog(&jit, fp, stack_depth)) {
 			fp = orig_fp;
 			goto free_addrs;
 		}
@@ -1366,7 +1388,7 @@ struct bpf_prog *bpf_int_jit_compile(struct bpf_prog *fp)
 		fp = orig_fp;
 		goto free_addrs;
 	}
-	if (bpf_jit_prog(&jit, fp)) {
+	if (bpf_jit_prog(&jit, fp, stack_depth)) {
 		bpf_jit_binary_free(header);
 		fp = orig_fp;
 		goto free_addrs;

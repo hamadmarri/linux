@@ -75,6 +75,17 @@ int panfrost_gpu_soft_reset(struct panfrost_device *pfdev)
 	return 0;
 }
 
+void panfrost_gpu_amlogic_quirk(struct panfrost_device *pfdev)
+{
+	/*
+	 * The Amlogic integrated Mali-T820, Mali-G31 & Mali-G52 needs
+	 * these undocumented bits in GPU_PWR_OVERRIDE1 to be set in order
+	 * to operate correctly.
+	 */
+	gpu_write(pfdev, GPU_PWR_KEY, GPU_PWR_KEY_UNLOCK);
+	gpu_write(pfdev, GPU_PWR_OVERRIDE1, 0xfff | (0x20 << 16));
+}
+
 static void panfrost_gpu_init_quirks(struct panfrost_device *pfdev)
 {
 	u32 quirks = 0;
@@ -299,10 +310,12 @@ void panfrost_gpu_power_on(struct panfrost_device *pfdev)
 	int ret;
 	u32 val;
 
+	panfrost_gpu_init_quirks(pfdev);
+
 	/* Just turn on everything for now */
 	gpu_write(pfdev, L2_PWRON_LO, pfdev->features.l2_present);
 	ret = readl_relaxed_poll_timeout(pfdev->iomem + L2_READY_LO,
-		val, val == pfdev->features.l2_present, 100, 1000);
+		val, val == pfdev->features.l2_present, 100, 20000);
 
 	gpu_write(pfdev, STACK_PWRON_LO, pfdev->features.stack_present);
 	ret |= readl_relaxed_poll_timeout(pfdev->iomem + STACK_READY_LO,
@@ -310,7 +323,7 @@ void panfrost_gpu_power_on(struct panfrost_device *pfdev)
 
 	gpu_write(pfdev, SHADER_PWRON_LO, pfdev->features.shader_present);
 	ret |= readl_relaxed_poll_timeout(pfdev->iomem + SHADER_READY_LO,
-		val, val == pfdev->features.shader_present, 100, 1000);
+		val, val == pfdev->features.shader_present, 100, 20000);
 
 	gpu_write(pfdev, TILER_PWRON_LO, pfdev->features.tiler_present);
 	ret |= readl_relaxed_poll_timeout(pfdev->iomem + TILER_READY_LO,
@@ -352,7 +365,6 @@ int panfrost_gpu_init(struct panfrost_device *pfdev)
 		return err;
 	}
 
-	panfrost_gpu_init_quirks(pfdev);
 	panfrost_gpu_power_on(pfdev);
 
 	return 0;

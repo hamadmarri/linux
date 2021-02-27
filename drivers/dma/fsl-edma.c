@@ -20,6 +20,13 @@
 
 #include "fsl-edma-common.h"
 
+static void fsl_edma_synchronize(struct dma_chan *chan)
+{
+	struct fsl_edma_chan *fsl_chan = to_fsl_edma_chan(chan);
+
+	vchan_synchronize(&fsl_chan->vchan);
+}
+
 static irqreturn_t fsl_edma_tx_handler(int irq, void *dev_id)
 {
 	struct fsl_edma_engine *fsl_edma = dev_id;
@@ -38,6 +45,13 @@ static irqreturn_t fsl_edma_tx_handler(int irq, void *dev_id)
 			fsl_chan = &fsl_edma->chans[ch];
 
 			spin_lock(&fsl_chan->vchan.lock);
+
+			if (!fsl_chan->edesc) {
+				/* terminate_all called before */
+				spin_unlock(&fsl_chan->vchan.lock);
+				continue;
+			}
+
 			if (!fsl_chan->edesc->iscyclic) {
 				list_del(&fsl_chan->edesc->vdesc.node);
 				vchan_cookie_complete(&fsl_chan->edesc->vdesc);
@@ -162,6 +176,49 @@ fsl_edma_irq_init(struct platform_device *pdev, struct fsl_edma_engine *fsl_edma
 	return 0;
 }
 
+static int
+fsl_edma2_irq_init(struct platform_device *pdev,
+		   struct fsl_edma_engine *fsl_edma)
+{
+	int i, ret, irq;
+	int count;
+
+	count = platform_irq_count(pdev);
+	dev_dbg(&pdev->dev, "%s Found %d interrupts\r\n", __func__, count);
+	if (count <= 2) {
+		dev_err(&pdev->dev, "Interrupts in DTS not correct.\n");
+		return -EINVAL;
+	}
+	/*
+	 * 16 channel independent interrupts + 1 error interrupt on i.mx7ulp.
+	 * 2 channel share one interrupt, for example, ch0/ch16, ch1/ch17...
+	 * For now, just simply request irq without IRQF_SHARED flag, since 16
+	 * channels are enough on i.mx7ulp whose M4 domain own some peripherals.
+	 */
+	for (i = 0; i < count; i++) {
+		irq = platform_get_irq(pdev, i);
+		if (irq < 0)
+			return -ENXIO;
+
+		sprintf(fsl_edma->chans[i].chan_name, "eDMA2-CH%02d", i);
+
+		/* The last IRQ is for eDMA err */
+		if (i == count - 1)
+			ret = devm_request_irq(&pdev->dev, irq,
+						fsl_edma_err_handler,
+						0, "eDMA2-ERR", fsl_edma);
+		else
+			ret = devm_request_irq(&pdev->dev, irq,
+						fsl_edma_tx_handler, 0,
+						fsl_edma->chans[i].chan_name,
+						fsl_edma);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 static void fsl_edma_irq_exit(
 		struct platform_device *pdev, struct fsl_edma_engine *fsl_edma)
 {
@@ -187,8 +244,24 @@ static struct fsl_edma_drvdata vf610_data = {
 	.setup_irq = fsl_edma_irq_init,
 };
 
+static struct fsl_edma_drvdata ls1028a_data = {
+	.version = v1,
+	.dmamuxs = DMAMUX_NR,
+	.mux_swap = true,
+	.setup_irq = fsl_edma_irq_init,
+};
+
+static struct fsl_edma_drvdata imx7ulp_data = {
+	.version = v3,
+	.dmamuxs = 1,
+	.has_dmaclk = true,
+	.setup_irq = fsl_edma2_irq_init,
+};
+
 static const struct of_device_id fsl_edma_dt_ids[] = {
 	{ .compatible = "fsl,vf610-edma", .data = &vf610_data},
+	{ .compatible = "fsl,ls1028a-edma", .data = &ls1028a_data},
+	{ .compatible = "fsl,imx7ulp-edma", .data = &imx7ulp_data},
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, fsl_edma_dt_ids);
@@ -235,6 +308,20 @@ static int fsl_edma_probe(struct platform_device *pdev)
 
 	fsl_edma_setup_regs(fsl_edma);
 	regs = &fsl_edma->regs;
+
+	if (drvdata->has_dmaclk) {
+		fsl_edma->dmaclk = devm_clk_get(&pdev->dev, "dma");
+		if (IS_ERR(fsl_edma->dmaclk)) {
+			dev_err(&pdev->dev, "Missing DMA block clock.\n");
+			return PTR_ERR(fsl_edma->dmaclk);
+		}
+
+		ret = clk_prepare_enable(fsl_edma->dmaclk);
+		if (ret) {
+			dev_err(&pdev->dev, "DMA clk block failed.\n");
+			return ret;
+		}
+	}
 
 	for (i = 0; i < fsl_edma->drvdata->dmamuxs; i++) {
 		char clkname[32];
@@ -302,6 +389,7 @@ static int fsl_edma_probe(struct platform_device *pdev)
 	fsl_edma->dma_dev.device_pause = fsl_edma_pause;
 	fsl_edma->dma_dev.device_resume = fsl_edma_resume;
 	fsl_edma->dma_dev.device_terminate_all = fsl_edma_terminate_all;
+	fsl_edma->dma_dev.device_synchronize = fsl_edma_synchronize;
 	fsl_edma->dma_dev.device_issue_pending = fsl_edma_issue_pending;
 
 	fsl_edma->dma_dev.src_addr_widths = FSL_EDMA_BUSWIDTHS;

@@ -439,6 +439,9 @@ static int fnic_queuecommand_lck(struct scsi_cmnd *sc, void (*done)(struct scsi_
 	if (unlikely(fnic_chk_state_flags_locked(fnic, FNIC_FLAGS_IO_BLOCKED)))
 		return SCSI_MLQUEUE_HOST_BUSY;
 
+	if (unlikely(fnic_chk_state_flags_locked(fnic, FNIC_FLAGS_FWRESET)))
+		return SCSI_MLQUEUE_HOST_BUSY;
+
 	rport = starget_to_rport(scsi_target(sc->device));
 	if (!rport) {
 		FNIC_SCSI_DBG(KERN_DEBUG, fnic->lport->host,
@@ -917,10 +920,11 @@ static void fnic_fcpio_icmnd_cmpl_handler(struct fnic *fnic,
 	case FCPIO_SUCCESS:
 		sc->result = (DID_OK << 16) | icmnd_cmpl->scsi_status;
 		xfer_len = scsi_bufflen(sc);
-		scsi_set_resid(sc, icmnd_cmpl->residual);
 
-		if (icmnd_cmpl->flags & FCPIO_ICMND_CMPL_RESID_UNDER)
+		if (icmnd_cmpl->flags & FCPIO_ICMND_CMPL_RESID_UNDER) {
 			xfer_len -= icmnd_cmpl->residual;
+			scsi_set_resid(sc, icmnd_cmpl->residual);
+		}
 
 		if (icmnd_cmpl->scsi_status == SAM_STAT_CHECK_CONDITION)
 			atomic64_inc(&fnic_stats->misc_stats.check_condition);
@@ -1397,7 +1401,7 @@ static void fnic_cleanup_io(struct fnic *fnic, int exclude_id)
 		}
 		if (!io_req) {
 			spin_unlock_irqrestore(io_lock, flags);
-			goto cleanup_scsi_cmd;
+			continue;
 		}
 
 		CMD_SP(sc) = NULL;
@@ -1412,7 +1416,6 @@ static void fnic_cleanup_io(struct fnic *fnic, int exclude_id)
 		fnic_release_ioreq_buf(fnic, io_req, sc);
 		mempool_free(io_req, fnic->io_req_pool);
 
-cleanup_scsi_cmd:
 		sc->result = DID_TRANSPORT_DISRUPTED << 16;
 		FNIC_SCSI_DBG(KERN_DEBUG, fnic->lport->host,
 			      "%s: tag:0x%x : sc:0x%p duration = %lu DID_TRANSPORT_DISRUPTED\n",
@@ -1730,15 +1733,14 @@ void fnic_terminate_rport_io(struct fc_rport *rport)
 			continue;
 		}
 
-		cmd_rport = starget_to_rport(scsi_target(sc->device));
-		if (rport != cmd_rport) {
+		io_req = (struct fnic_io_req *)CMD_SP(sc);
+		if (!io_req) {
 			spin_unlock_irqrestore(io_lock, flags);
 			continue;
 		}
 
-		io_req = (struct fnic_io_req *)CMD_SP(sc);
-
-		if (!io_req || rport != cmd_rport) {
+		cmd_rport = starget_to_rport(scsi_target(sc->device));
+		if (rport != cmd_rport) {
 			spin_unlock_irqrestore(io_lock, flags);
 			continue;
 		}
@@ -2669,7 +2671,8 @@ void fnic_scsi_abort_io(struct fc_lport *lp)
 	/* Issue firmware reset for fnic, wait for reset to complete */
 retry_fw_reset:
 	spin_lock_irqsave(&fnic->fnic_lock, flags);
-	if (unlikely(fnic->state == FNIC_IN_FC_TRANS_ETH_MODE)) {
+	if (unlikely(fnic->state == FNIC_IN_FC_TRANS_ETH_MODE) &&
+		     fnic->link_events) {
 		/* fw reset is in progress, poll for its completion */
 		spin_unlock_irqrestore(&fnic->fnic_lock, flags);
 		schedule_timeout(msecs_to_jiffies(100));

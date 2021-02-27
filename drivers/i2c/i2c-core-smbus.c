@@ -495,6 +495,13 @@ static s32 i2c_smbus_xfer_emulated(struct i2c_adapter *adapter, u16 addr,
 			break;
 		case I2C_SMBUS_BLOCK_DATA:
 		case I2C_SMBUS_BLOCK_PROC_CALL:
+			if (msg[1].buf[0] > I2C_SMBUS_BLOCK_MAX) {
+				dev_err(&adapter->dev,
+					"Invalid block size returned: %d\n",
+					msg[1].buf[0]);
+				status = -EPROTO;
+				goto cleanup;
+			}
 			for (i = 0; i < msg[1].buf[0] + 1; i++)
 				data->block[i] = msg[1].buf[i];
 			break;
@@ -675,11 +682,6 @@ EXPORT_SYMBOL(i2c_smbus_read_i2c_block_data_or_emulated);
  *
  * Handling can be done either through our IRQ handler, or by the
  * adapter (from its handler, periodic polling, or whatever).
- *
- * NOTE that if we manage the IRQ, we *MUST* know if it's level or
- * edge triggered in order to hand it to the workqueue correctly.
- * If triggering the alert seems to wedge the system, you probably
- * should have said it's level triggered.
  *
  * This returns the ara client, which should be saved for later use with
  * i2c_handle_smbus_alert() and ultimately i2c_unregister_device(); or NULL

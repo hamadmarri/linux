@@ -32,6 +32,7 @@
 #include <linux/nmi.h>
 #include <linux/percpu.h>
 #include <linux/kmod.h>
+#include <linux/kprobes.h>
 #include <linux/vmalloc.h>
 #include <linux/kernel_stat.h>
 #include <linux/start_kernel.h>
@@ -433,7 +434,7 @@ noinline void __ref rest_init(void)
 
 	/*
 	 * Enable might_sleep() and smp_processor_id() checks.
-	 * They cannot be enabled earlier because with CONFIG_PREEMPT=y
+	 * They cannot be enabled earlier because with CONFIG_PREEMPTION=y
 	 * kernel_thread() would trigger might_sleep() splats. With
 	 * CONFIG_PREEMPT_VOLUNTARY=y the init task might have scheduled
 	 * already, but it's stuck on the kthreadd_done completion.
@@ -553,6 +554,7 @@ static void __init mm_init(void)
 	 * bigger than MAX_ORDER unless SPARSEMEM.
 	 */
 	page_ext_init_flatmem();
+	init_debug_pagealloc();
 	report_meminit();
 	mem_init();
 	kmem_cache_init();
@@ -593,6 +595,7 @@ asmlinkage __visible void __init start_kernel(void)
 	boot_cpu_init();
 	page_address_init();
 	pr_notice("%s", linux_banner);
+	early_security_init();
 	setup_arch(&command_line);
 	mm_init_cpumask(&init_mm);
 	setup_command_line(command_line);
@@ -693,7 +696,6 @@ asmlinkage __visible void __init start_kernel(void)
 	boot_init_stack_canary();
 
 	time_init();
-	printk_safe_init();
 	perf_event_init();
 	profile_init();
 	call_function_init();
@@ -760,6 +762,7 @@ asmlinkage __visible void __init start_kernel(void)
 	proc_caches_init();
 	uts_ns_init();
 	buffer_init();
+	hidden_area_init();
 	key_init();
 	security_init();
 	dbg_late_init();
@@ -783,6 +786,8 @@ asmlinkage __visible void __init start_kernel(void)
 
 	/* Do the rest non-__init'ed, we're now alive */
 	arch_call_rest_init();
+
+	prevent_tail_call_optimization();
 }
 
 /* Call all constructor functions linked into the kernel. */
@@ -1110,6 +1115,7 @@ static int __ref kernel_init(void *unused)
 	kernel_init_freeable();
 	/* need to finish all async __init code before freeing the memory */
 	async_synchronize_full();
+	kprobe_free_init_mem();
 	ftrace_free_init_mem();
 	free_initmem();
 	mark_readonly();

@@ -1620,7 +1620,7 @@ static int __populate_dimms(struct mem_ctl_info *mci,
 		}
 
 		for (j = 0; j < max_dimms_per_channel; j++) {
-			dimm = EDAC_DIMM_PTR(mci->layers, mci->dimms, mci->n_layers, i, j, 0);
+			dimm = edac_get_dimm(mci, i, j, 0);
 			if (pvt->info.type == KNIGHTS_LANDING) {
 				pci_read_config_dword(pvt->knl.pci_channel[i],
 					knl_mtr_reg, &mtr);
@@ -3425,13 +3425,13 @@ fail0:
 }
 
 static const struct x86_cpu_id sbridge_cpuids[] = {
-	INTEL_CPU_FAM6(SANDYBRIDGE_X,	  pci_dev_descr_sbridge_table),
-	INTEL_CPU_FAM6(IVYBRIDGE_X,	  pci_dev_descr_ibridge_table),
-	INTEL_CPU_FAM6(HASWELL_X,	  pci_dev_descr_haswell_table),
-	INTEL_CPU_FAM6(BROADWELL_X,	  pci_dev_descr_broadwell_table),
-	INTEL_CPU_FAM6(BROADWELL_XEON_D,  pci_dev_descr_broadwell_table),
-	INTEL_CPU_FAM6(XEON_PHI_KNL,	  pci_dev_descr_knl_table),
-	INTEL_CPU_FAM6(XEON_PHI_KNM,	  pci_dev_descr_knl_table),
+	X86_MATCH_INTEL_FAM6_MODEL(SANDYBRIDGE_X, &pci_dev_descr_sbridge_table),
+	X86_MATCH_INTEL_FAM6_MODEL(IVYBRIDGE_X,	  &pci_dev_descr_ibridge_table),
+	X86_MATCH_INTEL_FAM6_MODEL(HASWELL_X,	  &pci_dev_descr_haswell_table),
+	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_X,	  &pci_dev_descr_broadwell_table),
+	X86_MATCH_INTEL_FAM6_MODEL(BROADWELL_D,	  &pci_dev_descr_broadwell_table),
+	X86_MATCH_INTEL_FAM6_MODEL(XEON_PHI_KNL,  &pci_dev_descr_knl_table),
+	X86_MATCH_INTEL_FAM6_MODEL(XEON_PHI_KNM,  &pci_dev_descr_knl_table),
 	{ }
 };
 MODULE_DEVICE_TABLE(x86cpu, sbridge_cpuids);

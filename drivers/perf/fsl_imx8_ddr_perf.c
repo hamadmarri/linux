@@ -47,6 +47,7 @@ static const struct of_device_id imx_ddr_pmu_dt_ids[] = {
 	{ .compatible = "fsl,imx8m-ddr-pmu",},
 	{ /* sentinel */ }
 };
+MODULE_DEVICE_TABLE(of, imx_ddr_pmu_dt_ids);
 
 struct ddr_pmu {
 	struct pmu pmu;
@@ -359,6 +360,7 @@ static int ddr_perf_init(struct ddr_pmu *pmu, void __iomem *base,
 {
 	*pmu = (struct ddr_pmu) {
 		.pmu = (struct pmu) {
+			.module	      = THIS_MODULE,
 			.capabilities = PERF_PMU_CAP_NO_EXCLUDE,
 			.task_ctx_nr = perf_invalid_context,
 			.attr_groups = attr_groups,

@@ -59,6 +59,8 @@ struct pci_slot {
 	struct hotplug_slot	*hotplug;	/* Hotplug info (move here) */
 	unsigned char		number;		/* PCI_SLOT(pci_dev->devfn) */
 	struct kobject		kobj;
+
+	void* suse_kabi_padding;
 };
 
 static inline const char *pci_slot_name(const struct pci_slot *slot)
@@ -271,6 +273,9 @@ struct pci_cap_saved_data {
 	u16		cap_nr;
 	bool		cap_extended;
 	unsigned int	size;
+
+	void* suse_kabi_padding;
+
 	u32		data[0];
 };
 
@@ -413,8 +418,8 @@ struct pci_dev {
 	 * mappings to make sure they cannot access arbitrary memory.
 	 */
 	unsigned int	untrusted:1;
-	unsigned int	__aer_firmware_first_valid:1;
-	unsigned int	__aer_firmware_first:1;
+	unsigned int	__aer_firmware_first_valid:1; /* XXX: no longer used, SLE-specific kABI placeholder */
+	unsigned int	__aer_firmware_first:1; /* XXX: no longer used, SLE-specific kABI placeholder */
 	unsigned int	broken_intx_masking:1;	/* INTx masking can't be used */
 	unsigned int	io_window_1k:1;		/* Intel bridge 1K I/O windows */
 	unsigned int	irq_managed:1;
@@ -423,6 +428,9 @@ struct pci_dev {
 	unsigned int	is_probed:1;		/* Device probing in progress */
 	unsigned int	link_active_reporting:1;/* Device capable of reporting link active */
 	unsigned int	no_vf_scan:1;		/* Don't scan for VFs after IOV enablement */
+#ifndef __GENKSYMS__	/* BIT 5 in the second 'unsigned int' of the bitfield, so this is safe */
+	unsigned int	no_command_memory:1;	/* No PCI_COMMAND_MEMORY */
+#endif
 	pci_dev_flags_t dev_flags;
 	atomic_t	enable_cnt;	/* pci_enable_device has been called */
 
@@ -467,7 +475,17 @@ struct pci_dev {
 	size_t		romlen;		/* Length if not from BAR */
 	char		*driver_override; /* Driver name to force a match */
 
+	void* suse_kabi_padding;
+
 	unsigned long	priv_flags;	/* Private flags for the PCI driver */
+
+#ifdef CONFIG_PCIE_DPC
+#ifndef __GENKSYMS__
+	u16		dpc_cap;
+	unsigned int	dpc_rp_extensions:1;
+	u8		dpc_rp_log_size;
+#endif /* __GENKSYMS__ */
+#endif
 };
 
 static inline struct pci_dev *pci_physfn(struct pci_dev *dev)
@@ -511,6 +529,8 @@ struct pci_host_bridge {
 	unsigned int	native_ltr:1;		/* OS may use PCIe LTR */
 	unsigned int	preserve_config:1;	/* Preserve FW resource setup */
 
+	void* suse_kabi_padding;
+
 	/* Resource alignment requirements */
 	resource_size_t (*align_resource)(struct pci_dev *dev,
 			const struct resource *res,
@@ -518,6 +538,10 @@ struct pci_host_bridge {
 			resource_size_t size,
 			resource_size_t align);
 	unsigned long	private[0] ____cacheline_aligned;
+
+#ifndef __GENKSYMS__
+	unsigned int	native_dpc:1;		/* OS may use PCIe DPC */
+#endif
 };
 
 #define	to_pci_host_bridge(n) container_of(n, struct pci_host_bridge, dev)
@@ -601,6 +625,8 @@ struct pci_bus {
 	struct bin_attribute	*legacy_io;	/* Legacy I/O for this bus */
 	struct bin_attribute	*legacy_mem;	/* Legacy mem */
 	unsigned int		is_added:1;
+
+	void* suse_kabi_padding;
 };
 
 #define to_pci_bus(n)	container_of(n, struct pci_bus, dev)
@@ -839,6 +865,9 @@ struct pci_driver {
 	int  (*sriov_configure)(struct pci_dev *dev, int num_vfs); /* On PF */
 	const struct pci_error_handlers *err_handler;
 	const struct attribute_group **groups;
+
+	void* suse_kabi_padding;
+
 	struct device_driver	driver;
 	struct pci_dynids	dynids;
 };
@@ -2312,6 +2341,7 @@ void pci_release_bus_of_node(struct pci_bus *bus);
 struct irq_domain *pci_host_bridge_of_msi_domain(struct pci_bus *bus);
 int pci_parse_request_of_pci_ranges(struct device *dev,
 				    struct list_head *resources,
+				    struct list_head *ib_resources,
 				    struct resource **bus_range);
 
 /* Arch may override this (weak) */
@@ -2324,9 +2354,11 @@ static inline void pci_set_bus_of_node(struct pci_bus *bus) { }
 static inline void pci_release_bus_of_node(struct pci_bus *bus) { }
 static inline struct irq_domain *
 pci_host_bridge_of_msi_domain(struct pci_bus *bus) { return NULL; }
-static inline int pci_parse_request_of_pci_ranges(struct device *dev,
-						  struct list_head *resources,
-						  struct resource **bus_range)
+static inline int
+pci_parse_request_of_pci_ranges(struct device *dev,
+				struct list_head *resources,
+				struct list_head *ib_resources,
+				struct resource **bus_range)
 {
 	return -EINVAL;
 }
@@ -2348,9 +2380,11 @@ struct irq_domain *pci_host_bridge_acpi_msi_domain(struct pci_bus *bus);
 
 void
 pci_msi_register_fwnode_provider(struct fwnode_handle *(*fn)(struct device *));
+bool pci_pr3_present(struct pci_dev *pdev);
 #else
 static inline struct irq_domain *
 pci_host_bridge_acpi_msi_domain(struct pci_bus *bus) { return NULL; }
+static inline bool pci_pr3_present(struct pci_dev *pdev) { return false; }
 #endif
 
 #ifdef CONFIG_EEH

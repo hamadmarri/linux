@@ -423,6 +423,7 @@ static int snd_pcm_update_hw_ptr0(struct snd_pcm_substream *substream,
 
  no_delta_check:
 	if (runtime->status->hw_ptr == new_hw_ptr) {
+		runtime->hw_ptr_jiffies = curr_jiffies;
 		update_audio_tstamp(substream, &curr_tstamp, &audio_tstamp);
 		return 0;
 	}
@@ -479,7 +480,7 @@ void snd_pcm_set_ops(struct snd_pcm *pcm, int direction,
 EXPORT_SYMBOL(snd_pcm_set_ops);
 
 /**
- * snd_pcm_sync - set the PCM sync id
+ * snd_pcm_set_sync - set the PCM sync id
  * @substream: the pcm substream
  *
  * Sets the PCM sync identifier for the card.
@@ -1134,11 +1135,12 @@ int snd_pcm_hw_rule_add(struct snd_pcm_runtime *runtime, unsigned int cond,
 	c->private = private;
 	k = 0;
 	while (1) {
-		if (snd_BUG_ON(k >= ARRAY_SIZE(c->deps))) {
+		if (k < ARRAY_SIZE(c->deps)) {
+			c->deps[k++] = dep;
+		} else if (snd_BUG_ON(dep >= 0)) { /* overflow? */
 			va_end(args);
 			return -EINVAL;
 		}
-		c->deps[k++] = dep;
 		if (dep < 0)
 			break;
 		dep = va_arg(args, int);
@@ -2308,7 +2310,6 @@ static int pcm_chmap_ctl_info(struct snd_kcontrol *kcontrol,
 	struct snd_pcm_chmap *info = snd_kcontrol_chip(kcontrol);
 
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
-	uinfo->count = 0;
 	uinfo->count = info->max_channels;
 	uinfo->value.integer.min = 0;
 	uinfo->value.integer.max = SNDRV_CHMAP_LAST;

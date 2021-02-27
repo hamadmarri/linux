@@ -60,11 +60,14 @@ struct btrfs_inode {
 	 */
 	struct extent_io_tree io_failure_tree;
 
+	/*
+	 * Keep track of where the inode has extent items mapped in order to
+	 * make sure the i_size adjustments are accurate
+	 */
+	struct extent_io_tree file_extent_tree;
+
 	/* held while logging the inode in tree-log.c */
 	struct mutex log_mutex;
-
-	/* held while doing delalloc reservations */
-	struct mutex delalloc_mutex;
 
 	/* used to order data wrt metadata */
 	struct btrfs_ordered_inode_tree ordered_tree;
@@ -146,6 +149,17 @@ struct btrfs_inode {
 	 * details
 	 */
 	u64 last_unlink_trans;
+
+	/*
+	 * The id/generation of the last transaction where this inode was
+	 * either the source or the destination of a clone/dedupe operation.
+	 * Used when logging an inode to know if there are shared extents that
+	 * need special care when logging checksum items, to avoid duplicate
+	 * checksum items in a log (which can lead to a corruption where we end
+	 * up with missing checksum ranges after log replay).
+	 * Protected by the vfs inode lock.
+	 */
+	u64 last_reflink_trans;
 
 	/*
 	 * Number of bytes outstanding that are going to need csums.  This is

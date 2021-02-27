@@ -72,13 +72,6 @@
  * compilation unit
  */
 
-/*
- * If a packet's QP[23:16] bits match this value, then it is
- * a PSM packet and the hardware will expect a KDETH header
- * following the BTH.
- */
-#define DEFAULT_KDETH_QP 0x80
-
 /* driver/hw feature set bitmask */
 #define HFI1_CAP_USER_SHIFT      24
 #define HFI1_CAP_MASK            ((1UL << HFI1_CAP_USER_SHIFT) - 1)
@@ -322,6 +315,9 @@ struct diag_pkt {
 
 /* RHF receive type error - bypass packet errors */
 #define RHF_RTE_BYPASS_NO_ERR		0x0
+
+/* MAX RcvSEQ */
+#define RHF_MAX_SEQ 13
 
 /* IB - LRH header constants */
 #define HFI1_LRH_GRH 0x0003      /* 1. word of IB LRH - next header: GRH */

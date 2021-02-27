@@ -194,6 +194,8 @@ devkmsg_sysctl_set_loglvl(struct ctl_table *table, int write, void __user *buf,
 
 extern void wake_up_klogd(void);
 
+void printk_bust_locks(void);
+
 char *log_buf_addr_get(void);
 u32 log_buf_len_get(void);
 void log_buf_vmcoreinfo_setup(void);
@@ -202,7 +204,6 @@ __printf(1, 2) void dump_stack_set_arch_desc(const char *fmt, ...);
 void dump_stack_print_info(const char *log_lvl);
 void show_regs_print_info(const char *log_lvl);
 extern asmlinkage void dump_stack(void) __cold;
-extern void printk_safe_init(void);
 extern void printk_safe_flush(void);
 extern void printk_safe_flush_on_panic(void);
 #else
@@ -232,6 +233,10 @@ static inline bool printk_timed_ratelimit(unsigned long *caller_jiffies,
 }
 
 static inline void wake_up_klogd(void)
+{
+}
+
+static void printk_bust_locks(void)
 {
 }
 
@@ -266,10 +271,6 @@ static inline void show_regs_print_info(const char *log_lvl)
 }
 
 static inline void dump_stack(void)
-{
-}
-
-static inline void printk_safe_init(void)
 {
 }
 

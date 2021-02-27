@@ -28,6 +28,7 @@
 #include "gt/intel_engine.h"
 
 #include "i915_drv.h"
+#include "i915_memcpy.h"
 
 /**
  * DOC: batch buffer command parser
@@ -571,6 +572,9 @@ struct drm_i915_reg_descriptor {
 #define REG32(_reg, ...) \
 	{ .addr = (_reg), __VA_ARGS__ }
 
+#define REG32_IDX(_reg, idx) \
+	{ .addr = _reg(idx) }
+
 /*
  * Convenience macro for adding 64-bit registers.
  *
@@ -668,6 +672,7 @@ static const struct drm_i915_reg_descriptor gen9_blt_regs[] = {
 	REG64_IDX(RING_TIMESTAMP, BSD_RING_BASE),
 	REG32(BCS_SWCTRL),
 	REG64_IDX(RING_TIMESTAMP, BLT_RING_BASE),
+	REG32_IDX(RING_CTX_TIMESTAMP, BLT_RING_BASE),
 	REG64_IDX(BCS_GPR, 0),
 	REG64_IDX(BCS_GPR, 1),
 	REG64_IDX(BCS_GPR, 2),
@@ -1528,11 +1533,10 @@ err:
 int i915_cmd_parser_get_version(struct drm_i915_private *dev_priv)
 {
 	struct intel_engine_cs *engine;
-	enum intel_engine_id id;
 	bool active = false;
 
 	/* If the command parser is not enabled, report 0 - unsupported */
-	for_each_engine(engine, dev_priv, id) {
+	for_each_uabi_engine(engine, dev_priv) {
 		if (intel_engine_using_cmd_parser(engine)) {
 			active = true;
 			break;

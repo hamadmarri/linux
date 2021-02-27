@@ -120,6 +120,7 @@ static void process_queued_bios(struct work_struct *work);
 #define MPATHF_PG_INIT_DISABLED 4		/* pg_init is not currently allowed */
 #define MPATHF_PG_INIT_REQUIRED 5		/* pg_init needs calling? */
 #define MPATHF_PG_INIT_DELAY_RETRY 6		/* Delay pg_init retry? */
+#define MPATHF_NO_PARTITIONS 31			/* Don't scan partition table */
 
 /*-----------------------------------------------
  * Allocation routines
@@ -599,45 +600,10 @@ static struct pgpath *__map_bio(struct multipath *m, struct bio *bio)
 	return pgpath;
 }
 
-static struct pgpath *__map_bio_fast(struct multipath *m, struct bio *bio)
-{
-	struct pgpath *pgpath;
-	unsigned long flags;
-
-	/* Do we need to select a new pgpath? */
-	/*
-	 * FIXME: currently only switching path if no path (due to failure, etc)
-	 * - which negates the point of using a path selector
-	 */
-	pgpath = READ_ONCE(m->current_pgpath);
-	if (!pgpath)
-		pgpath = choose_pgpath(m, bio->bi_iter.bi_size);
-
-	if (!pgpath) {
-		if (test_bit(MPATHF_QUEUE_IF_NO_PATH, &m->flags)) {
-			/* Queue for the daemon to resubmit */
-			spin_lock_irqsave(&m->lock, flags);
-			bio_list_add(&m->queued_bios, bio);
-			spin_unlock_irqrestore(&m->lock, flags);
-			queue_work(kmultipathd, &m->process_queued_bios);
-
-			return ERR_PTR(-EAGAIN);
-		}
-		return NULL;
-	}
-
-	return pgpath;
-}
-
 static int __multipath_map_bio(struct multipath *m, struct bio *bio,
 			       struct dm_mpath_io *mpio)
 {
-	struct pgpath *pgpath;
-
-	if (!m->hw_handler_name)
-		pgpath = __map_bio_fast(m, bio);
-	else
-		pgpath = __map_bio(m, bio);
+	struct pgpath *pgpath = __map_bio(m, bio);
 
 	if (IS_ERR(pgpath))
 		return DM_MAPIO_SUBMITTED;
@@ -1074,6 +1040,10 @@ static int parse_features(struct dm_arg_set *as, struct multipath *m)
 			continue;
 		}
 
+		if (!strcasecmp(arg_name, "no_partitions")) {
+			set_bit(MPATHF_NO_PARTITIONS, &m->flags);
+			continue;
+		}
 		if (!strcasecmp(arg_name, "pg_init_retries") &&
 		    (argc >= 1)) {
 			r = dm_read_arg(_args + 1, as, &m->pg_init_retries, &ti->error);
@@ -1716,6 +1686,7 @@ static void multipath_status(struct dm_target *ti, status_type_t type,
 		DMEMIT("%u ", test_bit(MPATHF_QUEUE_IF_NO_PATH, &m->flags) +
 			      (m->pg_init_retries > 0) * 2 +
 			      (m->pg_init_delay_msecs != DM_PG_INIT_DELAY_DEFAULT) * 2 +
+			      test_bit(MPATHF_NO_PARTITIONS, &m->flags) +
 			      test_bit(MPATHF_RETAIN_ATTACHED_HW_HANDLER, &m->flags) +
 			      (m->queue_mode != DM_TYPE_REQUEST_BASED) * 2);
 
@@ -1723,6 +1694,8 @@ static void multipath_status(struct dm_target *ti, status_type_t type,
 			DMEMIT("queue_if_no_path ");
 		if (m->pg_init_retries)
 			DMEMIT("pg_init_retries %u ", m->pg_init_retries);
+		if (test_bit(MPATHF_NO_PARTITIONS, &m->flags))
+			DMEMIT("no_partitions ");
 		if (m->pg_init_delay_msecs != DM_PG_INIT_DELAY_DEFAULT)
 			DMEMIT("pg_init_delay_msecs %u ", m->pg_init_delay_msecs);
 		if (test_bit(MPATHF_RETAIN_ATTACHED_HW_HANDLER, &m->flags))

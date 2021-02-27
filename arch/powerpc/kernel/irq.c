@@ -601,7 +601,7 @@ static inline void check_stack_overflow(void)
 #ifdef CONFIG_DEBUG_STACKOVERFLOW
 	long sp;
 
-	sp = current_stack_pointer() & (THREAD_SIZE-1);
+	sp = current_stack_pointer & (THREAD_SIZE - 1);
 
 	/* check for stack overflow: is there less than 2KB free? */
 	if (unlikely(sp < 2048)) {
@@ -618,8 +618,6 @@ void __do_irq(struct pt_regs *regs)
 	irq_enter();
 
 	trace_irq_entry(regs);
-
-	check_stack_overflow();
 
 	/*
 	 * Query the platform PIC for the interrupt & ack it.
@@ -648,9 +646,11 @@ void do_IRQ(struct pt_regs *regs)
 	void *cursp, *irqsp, *sirqsp;
 
 	/* Switch to the irq stack to handle this */
-	cursp = (void *)(current_stack_pointer() & ~(THREAD_SIZE - 1));
+	cursp = (void *)(current_stack_pointer & ~(THREAD_SIZE - 1));
 	irqsp = hardirq_ctx[raw_smp_processor_id()];
 	sirqsp = softirq_ctx[raw_smp_processor_id()];
+
+	check_stack_overflow();
 
 	/* Already there ? */
 	if (unlikely(cursp == irqsp || cursp == sirqsp)) {

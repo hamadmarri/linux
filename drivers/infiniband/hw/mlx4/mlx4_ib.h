@@ -459,6 +459,7 @@ struct mlx4_ib_demux_pv_ctx {
 	struct ib_pd *pd;
 	struct work_struct work;
 	struct workqueue_struct *wq;
+	struct workqueue_struct *wi_wq;
 	struct mlx4_ib_demux_pv_qp qp[2];
 };
 
@@ -466,6 +467,7 @@ struct mlx4_ib_demux_ctx {
 	struct ib_device *ib_dev;
 	int port;
 	struct workqueue_struct *wq;
+	struct workqueue_struct *wi_wq;
 	struct workqueue_struct *ud_wq;
 	spinlock_t ud_lock;
 	atomic64_t subnet_prefix;
@@ -508,6 +510,7 @@ struct gid_entry {
 	union ib_gid	gid;
 	enum ib_gid_type gid_type;
 	struct gid_cache_context *ctx;
+	u16 vlan_id;
 };
 
 struct mlx4_port_gid_table {
@@ -786,11 +789,10 @@ int mlx4_ib_post_recv(struct ib_qp *ibqp, const struct ib_recv_wr *wr,
 int mlx4_MAD_IFC(struct mlx4_ib_dev *dev, int mad_ifc_flags,
 		 int port, const struct ib_wc *in_wc, const struct ib_grh *in_grh,
 		 const void *in_mad, void *response_mad);
-int mlx4_ib_process_mad(struct ib_device *ibdev, int mad_flags,	u8 port_num,
+int mlx4_ib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port_num,
 			const struct ib_wc *in_wc, const struct ib_grh *in_grh,
-			const struct ib_mad_hdr *in, size_t in_mad_size,
-			struct ib_mad_hdr *out, size_t *out_mad_size,
-			u16 *out_mad_pkey_index);
+			const struct ib_mad *in, struct ib_mad *out,
+			size_t *out_mad_size, u16 *out_mad_pkey_index);
 int mlx4_ib_mad_init(struct mlx4_ib_dev *dev);
 void mlx4_ib_mad_cleanup(struct mlx4_ib_dev *dev);
 

@@ -95,10 +95,9 @@ static int nvdimm_bus_probe(struct device *dev)
 	rc = nd_drv->probe(dev);
 	debug_nvdimm_unlock(dev);
 
-	if (rc == 0)
-		nd_region_probe_success(nvdimm_bus, dev);
-	else
-		nd_region_disable(nvdimm_bus, dev);
+	if ((rc == 0 || rc == -EOPNOTSUPP) &&
+			dev->parent && is_nd_region(dev->parent))
+		nd_region_advance_seeds(to_nd_region(dev->parent), dev);
 	nvdimm_bus_probe_end(nvdimm_bus);
 
 	dev_dbg(&nvdimm_bus->dev, "END: %s.probe(%s) = %d\n", dev->driver->name,
@@ -121,7 +120,6 @@ static int nvdimm_bus_remove(struct device *dev)
 		rc = nd_drv->remove(dev);
 		debug_nvdimm_unlock(dev);
 	}
-	nd_region_disable(nvdimm_bus, dev);
 
 	dev_dbg(&nvdimm_bus->dev, "%s.remove(%s) = %d\n", dev->driver->name,
 			dev_name(dev), rc);
@@ -400,7 +398,7 @@ static int child_unregister(struct device *dev, void *data)
 
 		/* We are shutting down. Make state frozen artificially. */
 		nvdimm_bus_lock(dev);
-		nvdimm->sec.state = NVDIMM_SECURITY_FROZEN;
+		set_bit(NVDIMM_SECURITY_FROZEN, &nvdimm->sec.flags);
 		if (test_and_clear_bit(NDD_WORK_PENDING, &nvdimm->flags))
 			dev_put = true;
 		nvdimm_bus_unlock(dev);
@@ -683,15 +681,44 @@ static ssize_t numa_node_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(numa_node);
 
+static int nvdimm_dev_to_target_node(struct device *dev)
+{
+	struct device *parent = dev->parent;
+	struct nd_region *nd_region = NULL;
+
+	if (is_nd_region(dev))
+		nd_region = to_nd_region(dev);
+	else if (parent && is_nd_region(parent))
+		nd_region = to_nd_region(parent);
+
+	if (!nd_region)
+		return NUMA_NO_NODE;
+	return nd_region->target_node;
+}
+
+static ssize_t target_node_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	return sprintf(buf, "%d\n", nvdimm_dev_to_target_node(dev));
+}
+static DEVICE_ATTR_RO(target_node);
+
 static struct attribute *nd_numa_attributes[] = {
 	&dev_attr_numa_node.attr,
+	&dev_attr_target_node.attr,
 	NULL,
 };
 
 static umode_t nd_numa_attr_visible(struct kobject *kobj, struct attribute *a,
 		int n)
 {
+	struct device *dev = container_of(kobj, typeof(*dev), kobj);
+
 	if (!IS_ENABLED(CONFIG_NUMA))
+		return 0;
+
+	if (a == &dev_attr_target_node.attr &&
+			nvdimm_dev_to_target_node(dev) == NUMA_NO_NODE)
 		return 0;
 
 	return a->mode;
@@ -1012,8 +1039,10 @@ static int __nd_ioctl(struct nvdimm_bus *nvdimm_bus, struct nvdimm *nvdimm,
 			return -EFAULT;
 	}
 
-	if (!desc || (desc->out_num + desc->in_num == 0) ||
-			!test_bit(cmd, &cmd_mask))
+	if (!desc ||
+	    (desc->out_num + desc->in_num == 0) ||
+	    cmd > ND_CMD_CALL ||
+	    !test_bit(cmd, &cmd_mask))
 		return -ENOTTY;
 
 	/* fail write commands (when read-only) */

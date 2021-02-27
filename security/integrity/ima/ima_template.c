@@ -23,6 +23,7 @@ static struct ima_template_desc builtin_templates[] = {
 	{.name = "ima-ng", .fmt = "d-ng|n-ng"},
 	{.name = "ima-sig", .fmt = "d-ng|n-ng|sig"},
 	{.name = "ima-buf", .fmt = "d-ng|n-ng|buf"},
+	{.name = "ima-modsig", .fmt = "d-ng|n-ng|sig|d-modsig|modsig"},
 	{.name = "", .fmt = ""},	/* placeholder for a custom format */
 };
 
@@ -42,6 +43,10 @@ static const struct ima_template_field supported_fields[] = {
 	 .field_show = ima_show_template_sig},
 	{.field_id = "buf", .field_init = ima_eventbuf_init,
 	 .field_show = ima_show_template_buf},
+	{.field_id = "d-modsig", .field_init = ima_eventdigest_modsig_init,
+	 .field_show = ima_show_template_digest_ng},
+	{.field_id = "modsig", .field_init = ima_eventmodsig_init,
+	 .field_show = ima_show_template_sig},
 };
 
 /*
@@ -49,9 +54,28 @@ static const struct ima_template_field supported_fields[] = {
  * need to be accounted for since they shouldn't be defined in the same template
  * description as 'd-ng' and 'n-ng' respectively.
  */
-#define MAX_TEMPLATE_NAME_LEN sizeof("d-ng|n-ng|sig|buf")
+#define MAX_TEMPLATE_NAME_LEN sizeof("d-ng|n-ng|sig|buf|d-modisg|modsig")
 
 static struct ima_template_desc *ima_template;
+
+/**
+ * ima_template_has_modsig - Check whether template has modsig-related fields.
+ * @ima_template: IMA template to check.
+ *
+ * Tells whether the given template has fields referencing a file's appended
+ * signature.
+ */
+bool ima_template_has_modsig(const struct ima_template_desc *ima_template)
+{
+	int i;
+
+	for (i = 0; i < ima_template->num_fields; i++)
+		if (!strcmp(ima_template->fields[i]->field_id, "modsig") ||
+		    !strcmp(ima_template->fields[i]->field_id, "d-modsig"))
+			return true;
+
+	return false;
+}
 
 static int __init ima_template_setup(char *str)
 {
@@ -279,6 +303,7 @@ static int ima_restore_template_data(struct ima_template_desc *template_desc,
 				     int template_data_size,
 				     struct ima_template_entry **entry)
 {
+	struct tpm_digest *digests;
 	int ret = 0;
 	int i;
 
@@ -288,11 +313,21 @@ static int ima_restore_template_data(struct ima_template_desc *template_desc,
 	if (!*entry)
 		return -ENOMEM;
 
+	digests = kcalloc(NR_BANKS(ima_tpm_chip) + ima_extra_slots,
+			  sizeof(*digests), GFP_NOFS);
+	if (!digests) {
+		kfree(*entry);
+		return -ENOMEM;
+	}
+
+	(*entry)->digests = digests;
+
 	ret = ima_parse_buf(template_data, template_data + template_data_size,
 			    NULL, template_desc->num_fields,
 			    (*entry)->template_data, NULL, NULL,
 			    ENFORCE_FIELDS | ENFORCE_BUFEND, "template data");
 	if (ret < 0) {
+		kfree((*entry)->digests);
 		kfree(*entry);
 		return ret;
 	}
@@ -325,6 +360,7 @@ static int ima_restore_template_data(struct ima_template_desc *template_desc,
 int ima_restore_measurement_list(loff_t size, void *buf)
 {
 	char template_name[MAX_TEMPLATE_NAME_LEN];
+	unsigned char zero[TPM_DIGEST_SIZE] = { 0 };
 
 	struct ima_kexec_hdr *khdr = buf;
 	struct ima_field_data hdr[HDR__LAST] = {
@@ -424,8 +460,17 @@ int ima_restore_measurement_list(loff_t size, void *buf)
 		if (ret < 0)
 			break;
 
-		memcpy(entry->digest, hdr[HDR_DIGEST].data,
-		       hdr[HDR_DIGEST].len);
+		if (memcmp(hdr[HDR_DIGEST].data, zero, sizeof(zero))) {
+			ret = ima_calc_field_array_hash(
+						&entry->template_data[0],
+						entry);
+			if (ret < 0) {
+				pr_err("cannot calculate template digest\n");
+				ret = -EINVAL;
+				break;
+			}
+		}
+
 		entry->pcr = !ima_canonical_fmt ? *(hdr[HDR_PCR].data) :
 			     le32_to_cpu(*(hdr[HDR_PCR].data));
 		ret = ima_restore_measurement_entry(entry);

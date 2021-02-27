@@ -197,7 +197,7 @@ static void tcp_reinit_congestion_control(struct sock *sk,
 	icsk->icsk_ca_setsockopt = 1;
 	memset(icsk->icsk_ca_priv, 0, sizeof(icsk->icsk_ca_priv));
 
-	if (sk->sk_state != TCP_CLOSE)
+	if (!((1 << sk->sk_state) & (TCPF_CLOSE | TCPF_LISTEN)))
 		tcp_init_congestion_control(sk);
 }
 
@@ -256,6 +256,9 @@ void tcp_get_available_congestion_control(char *buf, size_t maxlen)
 		offs += snprintf(buf + offs, maxlen - offs,
 				 "%s%s",
 				 offs == 0 ? "" : " ", ca->name);
+
+		if (WARN_ON_ONCE(offs >= maxlen))
+			break;
 	}
 	rcu_read_unlock();
 }
@@ -285,6 +288,9 @@ void tcp_get_allowed_congestion_control(char *buf, size_t maxlen)
 		offs += snprintf(buf + offs, maxlen - offs,
 				 "%s%s",
 				 offs == 0 ? "" : " ", ca->name);
+
+		if (WARN_ON_ONCE(offs >= maxlen))
+			break;
 	}
 	rcu_read_unlock();
 }

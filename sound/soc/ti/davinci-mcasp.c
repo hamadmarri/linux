@@ -1824,8 +1824,10 @@ static int davinci_mcasp_get_dma_type(struct davinci_mcasp *mcasp)
 				PTR_ERR(chan));
 		return PTR_ERR(chan);
 	}
-	if (WARN_ON(!chan->device || !chan->device->dev))
+	if (WARN_ON(!chan->device || !chan->device->dev)) {
+		dma_release_channel(chan);
 		return -EINVAL;
+	}
 
 	if (chan->device->dev->of_node)
 		ret = of_property_read_string(chan->device->dev->of_node,
@@ -2031,20 +2033,18 @@ static inline int davinci_mcasp_init_gpiochip(struct davinci_mcasp *mcasp)
 }
 #endif /* CONFIG_GPIOLIB */
 
-static int davinci_mcasp_get_dt_params(struct davinci_mcasp *mcasp)
+static void davinci_mcasp_get_dt_params(struct davinci_mcasp *mcasp)
 {
 	struct device_node *np = mcasp->dev->of_node;
 	int ret;
 	u32 val;
 
 	if (!np)
-		return 0;
+		return;
 
 	ret = of_property_read_u32(np, "auxclk-fs-ratio", &val);
 	if (ret >= 0)
 		mcasp->auxclk_fs_ratio = val;
-
-	return 0;
 }
 
 static int davinci_mcasp_probe(struct platform_device *pdev)
@@ -2280,9 +2280,7 @@ static int davinci_mcasp_probe(struct platform_device *pdev)
 	if (ret)
 		goto err;
 
-	ret = davinci_mcasp_get_dt_params(mcasp);
-	if (ret)
-		return -EINVAL;
+	davinci_mcasp_get_dt_params(mcasp);
 
 	ret = devm_snd_soc_register_component(&pdev->dev,
 					&davinci_mcasp_component,

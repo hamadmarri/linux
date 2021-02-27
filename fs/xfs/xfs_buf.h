@@ -270,6 +270,8 @@ static inline int xfs_buf_submit(struct xfs_buf *bp)
 }
 
 void xfs_buf_zero(struct xfs_buf *bp, size_t boff, size_t bsize);
+void __xfs_buf_mark_corrupt(struct xfs_buf *bp, xfs_failaddr_t fa);
+#define xfs_buf_mark_corrupt(bp) __xfs_buf_mark_corrupt((bp), __this_address)
 
 /* Buffer Utility Routines */
 extern void *xfs_buf_offset(struct xfs_buf *, size_t);
@@ -349,6 +351,12 @@ extern int xfs_setsize_buftarg(xfs_buftarg_t *, unsigned int);
 
 #define xfs_getsize_buftarg(buftarg)	block_size((buftarg)->bt_bdev)
 #define xfs_readonly_buftarg(buftarg)	bdev_read_only((buftarg)->bt_bdev)
+
+static inline int
+xfs_buftarg_dma_alignment(struct xfs_buftarg *bt)
+{
+	return queue_dma_alignment(bt->bt_bdev->bd_disk->queue);
+}
 
 int xfs_buf_reverify(struct xfs_buf *bp, const struct xfs_buf_ops *ops);
 bool xfs_verify_magic(struct xfs_buf *bp, __be32 dmagic);

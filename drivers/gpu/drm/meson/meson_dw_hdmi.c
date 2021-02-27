@@ -799,6 +799,11 @@ static bool meson_hdmi_connector_is_available(struct device *dev)
 	return false;
 }
 
+static void meson_disable_regulator(void *data)
+{
+	regulator_disable(data);
+}
+
 static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 				void *data)
 {
@@ -844,6 +849,10 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 		meson_dw_hdmi->hdmi_supply = NULL;
 	} else {
 		ret = regulator_enable(meson_dw_hdmi->hdmi_supply);
+		if (ret)
+			return ret;
+		ret = devm_add_action_or_reset(dev, meson_disable_regulator,
+					       meson_dw_hdmi->hdmi_supply);
 		if (ret)
 			return ret;
 	}
@@ -894,10 +903,8 @@ static int meson_dw_hdmi_bind(struct device *dev, struct device *master,
 		return PTR_ERR(dw_plat_data->regm);
 
 	irq = platform_get_irq(pdev, 0);
-	if (irq < 0) {
-		dev_err(dev, "Failed to get hdmi top irq\n");
+	if (irq < 0)
 		return irq;
-	}
 
 	ret = devm_request_threaded_irq(dev, irq, dw_hdmi_top_irq,
 					dw_hdmi_top_thread_irq, IRQF_SHARED,

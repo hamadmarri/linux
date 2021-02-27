@@ -46,6 +46,7 @@
 #include <linux/slab.h>
 #include <linux/ratelimit.h>
 #include <linux/nodemask.h>
+#include <linux/sched/mm.h>
 
 #include <trace/events/block.h>
 #include <linux/list_sort.h>
@@ -1134,7 +1135,7 @@ again:
 			bi->bi_iter.bi_size = STRIPE_SIZE;
 			bi->bi_write_hint = sh->dev[i].write_hint;
 			if (!rrdev)
-				sh->dev[i].write_hint = RWF_WRITE_LIFE_NOT_SET;
+				sh->dev[i].write_hint = RWH_WRITE_LIFE_NOT_SET;
 			/*
 			 * If this is discard request, set bi_vcnt 0. We don't
 			 * want to confuse SCSI because SCSI will replace payload
@@ -1187,7 +1188,7 @@ again:
 			rbi->bi_io_vec[0].bv_offset = 0;
 			rbi->bi_iter.bi_size = STRIPE_SIZE;
 			rbi->bi_write_hint = sh->dev[i].write_hint;
-			sh->dev[i].write_hint = RWF_WRITE_LIFE_NOT_SET;
+			sh->dev[i].write_hint = RWH_WRITE_LIFE_NOT_SET;
 			/*
 			 * If this is discard request, set bi_vcnt 0. We don't
 			 * want to confuse SCSI because SCSI will replace payload
@@ -2228,14 +2229,18 @@ static int grow_stripes(struct r5conf *conf, int num)
  * of the P and Q blocks.
  */
 static int scribble_alloc(struct raid5_percpu *percpu,
-			  int num, int cnt, gfp_t flags)
+			  int num, int cnt)
 {
 	size_t obj_size =
 		sizeof(struct page *) * (num+2) +
 		sizeof(addr_conv_t) * (num+2);
 	void *scribble;
+	unsigned int noio_flag;
 
-	scribble = kvmalloc_array(cnt, obj_size, flags);
+	/* use local noio_flag to avoid kabi breaking */
+	noio_flag = memalloc_noio_save();
+	scribble = kvmalloc_array(cnt, obj_size, GFP_KERNEL);
+	memalloc_noio_restore(noio_flag);
 	if (!scribble)
 		return -ENOMEM;
 
@@ -2267,8 +2272,7 @@ static int resize_chunks(struct r5conf *conf, int new_disks, int new_sectors)
 
 		percpu = per_cpu_ptr(conf->percpu, cpu);
 		err = scribble_alloc(percpu, new_disks,
-				     new_sectors / STRIPE_SECTORS,
-				     GFP_NOIO);
+				     new_sectors / STRIPE_SECTORS);
 		if (err)
 			break;
 	}
@@ -2550,10 +2554,16 @@ static void raid5_end_read_request(struct bio * bi)
 				(unsigned long long)s,
 				bdn);
 		} else if (atomic_read(&rdev->read_errors)
-			 > conf->max_nr_stripes)
-			pr_warn("md/raid:%s: Too many read errors, failing device %s.\n",
-			       mdname(conf->mddev), bdn);
-		else
+			 > conf->max_nr_stripes) {
+			if (!test_bit(Faulty, &rdev->flags)) {
+				pr_warn("md/raid:%s: %d read_errors > %d stripes\n",
+				    mdname(conf->mddev),
+				    atomic_read(&rdev->read_errors),
+				    conf->max_nr_stripes);
+				pr_warn("md/raid:%s: Too many read errors, failing device %s.\n",
+				    mdname(conf->mddev), bdn);
+			}
+		} else
 			retry = 1;
 		if (set_bad && test_bit(In_sync, &rdev->flags)
 		    && !test_bit(R5_ReadNoMerge, &sh->dev[i].flags))
@@ -3594,6 +3604,7 @@ static int need_this_block(struct stripe_head *sh, struct stripe_head_state *s,
 	 * is missing/faulty, then we need to read everything we can.
 	 */
 	if (sh->raid_conf->level != 6 &&
+	    sh->raid_conf->rmw_level != PARITY_DISABLE_RMW &&
 	    sh->sector < sh->raid_conf->mddev->recovery_cp)
 		/* reconstruct-write isn't being forced */
 		return 0;
@@ -4615,7 +4626,6 @@ static void break_stripe_batch_list(struct stripe_head *head_sh,
 					  (1 << STRIPE_FULL_WRITE) |
 					  (1 << STRIPE_BIOFILL_RUN) |
 					  (1 << STRIPE_COMPUTE_RUN)  |
-					  (1 << STRIPE_OPS_REQ_PENDING) |
 					  (1 << STRIPE_DISCARD) |
 					  (1 << STRIPE_BATCH_READY) |
 					  (1 << STRIPE_BATCH_ERR) |
@@ -4830,7 +4840,7 @@ static void handle_stripe(struct stripe_head *sh)
 	 * or to load a block that is being partially written.
 	 */
 	if (s.to_read || s.non_overwrite
-	    || (conf->level == 6 && s.to_write && s.failed)
+	    || (s.to_write && s.failed)
 	    || (s.syncing && (s.uptodate + s.compute < disks))
 	    || s.replacing
 	    || s.expanding)
@@ -5304,6 +5314,7 @@ static struct bio *chunk_aligned_read(struct mddev *mddev, struct bio *raid_bio)
 	if (!raid5_read_one_chunk(mddev, raid_bio))
 		return raid_bio;
 
+	md_io_acct(mddev, bio_op(raid_bio), bio_sectors(raid_bio));
 	return NULL;
 }
 
@@ -5494,7 +5505,7 @@ static void make_discard_request(struct mddev *mddev, struct bio *bi)
 		return;
 
 	logical_sector = bi->bi_iter.bi_sector & ~((sector_t)STRIPE_SECTORS-1);
-	last_sector = bi->bi_iter.bi_sector + (bi->bi_iter.bi_size>>9);
+	last_sector = bio_end_sector(bi);
 
 	bi->bi_next = NULL;
 
@@ -5621,6 +5632,8 @@ static bool raid5_make_request(struct mddev *mddev, struct bio * bi)
 	logical_sector = bi->bi_iter.bi_sector & ~((sector_t)STRIPE_SECTORS-1);
 	last_sector = bio_end_sector(bi);
 	bi->bi_next = NULL;
+
+	md_io_acct(mddev, bio_op(bi), bio_sectors(bi));
 
 	prepare_to_wait(&conf->wait_for_overlap, &w, TASK_UNINTERRUPTIBLE);
 	for (;logical_sector < last_sector; logical_sector += STRIPE_SECTORS) {
@@ -6593,7 +6606,6 @@ raid5_show_group_thread_cnt(struct mddev *mddev, char *page)
 
 static int alloc_thread_groups(struct r5conf *conf, int cnt,
 			       int *group_cnt,
-			       int *worker_cnt_per_group,
 			       struct r5worker_group **worker_groups);
 static ssize_t
 raid5_store_group_thread_cnt(struct mddev *mddev, const char *page, size_t len)
@@ -6602,7 +6614,7 @@ raid5_store_group_thread_cnt(struct mddev *mddev, const char *page, size_t len)
 	unsigned int new;
 	int err;
 	struct r5worker_group *new_groups, *old_groups;
-	int group_cnt, worker_cnt_per_group;
+	int group_cnt;
 
 	if (len >= PAGE_SIZE)
 		return -EINVAL;
@@ -6625,13 +6637,11 @@ raid5_store_group_thread_cnt(struct mddev *mddev, const char *page, size_t len)
 		if (old_groups)
 			flush_workqueue(raid5_wq);
 
-		err = alloc_thread_groups(conf, new,
-					  &group_cnt, &worker_cnt_per_group,
-					  &new_groups);
+		err = alloc_thread_groups(conf, new, &group_cnt, &new_groups);
 		if (!err) {
 			spin_lock_irq(&conf->device_lock);
 			conf->group_cnt = group_cnt;
-			conf->worker_cnt_per_group = worker_cnt_per_group;
+			conf->worker_cnt_per_group = new;
 			conf->worker_groups = new_groups;
 			spin_unlock_irq(&conf->device_lock);
 
@@ -6667,16 +6677,13 @@ static struct attribute_group raid5_attrs_group = {
 	.attrs = raid5_attrs,
 };
 
-static int alloc_thread_groups(struct r5conf *conf, int cnt,
-			       int *group_cnt,
-			       int *worker_cnt_per_group,
+static int alloc_thread_groups(struct r5conf *conf, int cnt, int *group_cnt,
 			       struct r5worker_group **worker_groups)
 {
 	int i, j, k;
 	ssize_t size;
 	struct r5worker *workers;
 
-	*worker_cnt_per_group = cnt;
 	if (cnt == 0) {
 		*group_cnt = 0;
 		*worker_groups = NULL;
@@ -6760,8 +6767,7 @@ static int alloc_scratch_buffer(struct r5conf *conf, struct raid5_percpu *percpu
 			       conf->previous_raid_disks),
 			   max(conf->chunk_sectors,
 			       conf->prev_chunk_sectors)
-			   / STRIPE_SECTORS,
-			   GFP_KERNEL)) {
+			   / STRIPE_SECTORS)) {
 		free_scratch_buffer(conf, percpu);
 		return -ENOMEM;
 	}
@@ -6877,7 +6883,7 @@ static struct r5conf *setup_conf(struct mddev *mddev)
 	struct disk_info *disk;
 	char pers_name[6];
 	int i;
-	int group_cnt, worker_cnt_per_group;
+	int group_cnt;
 	struct r5worker_group *new_group;
 	int ret;
 
@@ -6923,10 +6929,9 @@ static struct r5conf *setup_conf(struct mddev *mddev)
 	for (i = 0; i < PENDING_IO_MAX; i++)
 		list_add(&conf->pending_data[i].sibling, &conf->free_list);
 	/* Don't enable multi-threading by default*/
-	if (!alloc_thread_groups(conf, 0, &group_cnt, &worker_cnt_per_group,
-				 &new_group)) {
+	if (!alloc_thread_groups(conf, 0, &group_cnt, &new_group)) {
 		conf->group_cnt = group_cnt;
-		conf->worker_cnt_per_group = worker_cnt_per_group;
+		conf->worker_cnt_per_group = 0;
 		conf->worker_groups = new_group;
 	} else
 		goto abort;

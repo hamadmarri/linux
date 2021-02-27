@@ -1188,9 +1188,11 @@ static void ipoib_timeout(struct net_device *dev)
 
 	ipoib_warn(priv, "transmit timeout: latency %d msecs\n",
 		   jiffies_to_msecs(jiffies - dev_trans_start(dev)));
-	ipoib_warn(priv, "queue stopped %d, tx_head %u, tx_tail %u\n",
-		   netif_queue_stopped(dev),
-		   priv->tx_head, priv->tx_tail);
+	ipoib_warn(priv,
+		   "queue stopped %d, tx_head %u, tx_tail %u, global_tx_head %u, global_tx_tail %u\n",
+		   netif_queue_stopped(dev), priv->tx_head, priv->tx_tail,
+		   priv->global_tx_head, priv->global_tx_tail);
+
 	/* XXX reset QP, etc. */
 }
 
@@ -1705,7 +1707,7 @@ static int ipoib_dev_init_default(struct net_device *dev)
 		goto out_rx_ring_cleanup;
 	}
 
-	/* priv->tx_head, tx_tail & tx_outstanding are already 0 */
+	/* priv->tx_head, tx_tail and global_tx_tail/head are already 0 */
 
 	if (ipoib_transport_dev_init(dev, priv->ca)) {
 		pr_warn("%s: ipoib_transport_dev_init failed\n",
@@ -2019,6 +2021,15 @@ static int ipoib_set_vf_guid(struct net_device *dev, int vf, u64 guid, int type)
 	return ib_set_vf_guid(priv->ca, vf, priv->port, guid, type);
 }
 
+static int ipoib_get_vf_guid(struct net_device *dev, int vf,
+			     struct ifla_vf_guid *node_guid,
+			     struct ifla_vf_guid *port_guid)
+{
+	struct ipoib_dev_priv *priv = ipoib_priv(dev);
+
+	return ib_get_vf_guid(priv->ca, vf, priv->port, node_guid, port_guid);
+}
+
 static int ipoib_get_vf_stats(struct net_device *dev, int vf,
 			      struct ifla_vf_stats *vf_stats)
 {
@@ -2045,6 +2056,7 @@ static const struct net_device_ops ipoib_netdev_ops_pf = {
 	.ndo_set_vf_link_state	 = ipoib_set_vf_link_state,
 	.ndo_get_vf_config	 = ipoib_get_vf_config,
 	.ndo_get_vf_stats	 = ipoib_get_vf_stats,
+	.ndo_get_vf_guid	 = ipoib_get_vf_guid,
 	.ndo_set_vf_guid	 = ipoib_set_vf_guid,
 	.ndo_set_mac_address	 = ipoib_set_mac,
 	.ndo_get_stats64	 = ipoib_get_stats,
@@ -2458,6 +2470,8 @@ static struct net_device *ipoib_add_port(const char *format,
 
 	/* call event handler to ensure pkey in sync */
 	queue_work(ipoib_workqueue, &priv->flush_heavy);
+
+	ndev->rtnl_link_ops = ipoib_get_link_ops();
 
 	result = register_netdev(ndev);
 	if (result) {

@@ -334,6 +334,7 @@ struct cpuidle_state_kobj {
 	struct cpuidle_state_usage *state_usage;
 	struct completion kobj_unregister;
 	struct kobject kobj;
+	struct cpuidle_device *device;
 };
 
 #ifdef CONFIG_SUSPEND
@@ -391,6 +392,7 @@ static inline void cpuidle_remove_s2idle_attr_group(struct cpuidle_state_kobj *k
 #define kobj_to_state_obj(k) container_of(k, struct cpuidle_state_kobj, kobj)
 #define kobj_to_state(k) (kobj_to_state_obj(k)->state)
 #define kobj_to_state_usage(k) (kobj_to_state_obj(k)->state_usage)
+#define kobj_to_device(k) (kobj_to_state_obj(k)->device)
 #define attr_to_stateattr(a) container_of(a, struct cpuidle_state_attr, attr)
 
 static ssize_t cpuidle_state_show(struct kobject *kobj, struct attribute *attr,
@@ -414,9 +416,13 @@ static ssize_t cpuidle_state_store(struct kobject *kobj, struct attribute *attr,
 	struct cpuidle_state *state = kobj_to_state(kobj);
 	struct cpuidle_state_usage *state_usage = kobj_to_state_usage(kobj);
 	struct cpuidle_state_attr *cattr = attr_to_stateattr(attr);
+	struct cpuidle_device *dev = kobj_to_device(kobj);
 
 	if (cattr->store)
 		ret = cattr->store(state, state_usage, buf, size);
+
+	/* reset poll time cache */
+	dev->poll_limit_ns = 0;
 
 	return ret;
 }
@@ -468,12 +474,13 @@ static int cpuidle_add_state_sysfs(struct cpuidle_device *device)
 		}
 		kobj->state = &drv->states[i];
 		kobj->state_usage = &device->states_usage[i];
+		kobj->device = device;
 		init_completion(&kobj->kobj_unregister);
 
 		ret = kobject_init_and_add(&kobj->kobj, &ktype_state_cpuidle,
 					   &kdev->kobj, "state%d", i);
 		if (ret) {
-			kfree(kobj);
+			kobject_put(&kobj->kobj);
 			goto error_state;
 		}
 		cpuidle_add_s2idle_attr_group(kobj);
@@ -604,7 +611,7 @@ static int cpuidle_add_driver_sysfs(struct cpuidle_device *dev)
 	ret = kobject_init_and_add(&kdrv->kobj, &ktype_driver_cpuidle,
 				   &kdev->kobj, "driver");
 	if (ret) {
-		kfree(kdrv);
+		kobject_put(&kdrv->kobj);
 		return ret;
 	}
 
@@ -698,7 +705,7 @@ int cpuidle_add_sysfs(struct cpuidle_device *dev)
 	error = kobject_init_and_add(&kdev->kobj, &ktype_cpuidle, &cpu_dev->kobj,
 				   "cpuidle");
 	if (error) {
-		kfree(kdev);
+		kobject_put(&kdev->kobj);
 		return error;
 	}
 

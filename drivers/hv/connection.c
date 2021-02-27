@@ -14,6 +14,7 @@
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/hyperv.h>
@@ -26,6 +27,11 @@
 struct vmbus_connection vmbus_connection = {
 	.conn_state		= DISCONNECTED,
 	.next_gpadl_handle	= ATOMIC_INIT(0xE1E10),
+
+	.ready_for_suspend_event= COMPLETION_INITIALIZER(
+				  vmbus_connection.ready_for_suspend_event),
+	.ready_for_resume_event	= COMPLETION_INITIALIZER(
+				  vmbus_connection.ready_for_resume_event),
 };
 EXPORT_SYMBOL_GPL(vmbus_connection);
 
@@ -59,8 +65,13 @@ static __u32 vmbus_get_next_version(__u32 current_version)
 	}
 }
 
-static int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo,
-					__u32 version)
+static uint max_version;
+
+module_param(max_version, uint, S_IRUGO);
+MODULE_PARM_DESC(max_version,
+		"Maximal VMBus protocol version which can be negotiated (ignored!)");
+
+int vmbus_negotiate_version(struct vmbus_channel_msginfo *msginfo, u32 version)
 {
 	int ret = 0;
 	unsigned int cur_cpu;
@@ -202,7 +213,7 @@ int vmbus_connect(void)
 	 * abstraction stuff
 	 */
 	vmbus_connection.int_page =
-	(void *)__get_free_pages(GFP_KERNEL|__GFP_ZERO, 0);
+	(void *)hv_alloc_hyperv_zeroed_page();
 	if (vmbus_connection.int_page == NULL) {
 		ret = -ENOMEM;
 		goto cleanup;
@@ -211,14 +222,14 @@ int vmbus_connect(void)
 	vmbus_connection.recv_int_page = vmbus_connection.int_page;
 	vmbus_connection.send_int_page =
 		(void *)((unsigned long)vmbus_connection.int_page +
-			(PAGE_SIZE >> 1));
+			(HV_HYP_PAGE_SIZE >> 1));
 
 	/*
 	 * Setup the monitor notification facility. The 1st page for
 	 * parent->child and the 2nd page for child->parent
 	 */
-	vmbus_connection.monitor_pages[0] = (void *)__get_free_pages((GFP_KERNEL|__GFP_ZERO), 0);
-	vmbus_connection.monitor_pages[1] = (void *)__get_free_pages((GFP_KERNEL|__GFP_ZERO), 0);
+	vmbus_connection.monitor_pages[0] = (void *)hv_alloc_hyperv_zeroed_page();
+	vmbus_connection.monitor_pages[1] = (void *)hv_alloc_hyperv_zeroed_page();
 	if ((vmbus_connection.monitor_pages[0] == NULL) ||
 	    (vmbus_connection.monitor_pages[1] == NULL)) {
 		ret = -ENOMEM;
@@ -291,12 +302,12 @@ void vmbus_disconnect(void)
 		destroy_workqueue(vmbus_connection.work_queue);
 
 	if (vmbus_connection.int_page) {
-		free_pages((unsigned long)vmbus_connection.int_page, 0);
+		hv_free_hyperv_page((unsigned long)vmbus_connection.int_page);
 		vmbus_connection.int_page = NULL;
 	}
 
-	free_pages((unsigned long)vmbus_connection.monitor_pages[0], 0);
-	free_pages((unsigned long)vmbus_connection.monitor_pages[1], 0);
+	hv_free_hyperv_page((unsigned long)vmbus_connection.monitor_pages[0]);
+	hv_free_hyperv_page((unsigned long)vmbus_connection.monitor_pages[1]);
 	vmbus_connection.monitor_pages[0] = NULL;
 	vmbus_connection.monitor_pages[1] = NULL;
 }

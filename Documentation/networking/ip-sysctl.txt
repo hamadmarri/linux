@@ -402,11 +402,14 @@ tcp_max_orphans - INTEGER
 	up to ~64K of unswappable memory.
 
 tcp_max_syn_backlog - INTEGER
-	Maximal number of remembered connection requests, which have not
-	received an acknowledgment from connecting client.
+	Maximal number of remembered connection requests (SYN_RECV),
+	which have not received an acknowledgment from connecting client.
+	This is a per-listener limit.
 	The minimal value is 128 for low memory machines, and it will
 	increase in proportion to the memory of machine.
 	If server suffers from overload, try increasing this number.
+	Remember to also check /proc/sys/net/core/somaxconn
+	A SYN_RECV request socket consumes about 304 bytes of memory.
 
 tcp_max_tw_buckets - INTEGER
 	Maximal number of timewait sockets held by system simultaneously.
@@ -895,8 +898,9 @@ ip_local_port_range - 2 INTEGERS
 	Defines the local port range that is used by TCP and UDP to
 	choose the local port. The first number is the first, the
 	second the last local port number.
-	If possible, it is better these numbers have different parity.
-	(one even and one odd values)
+	If possible, it is better these numbers have different parity
+	(one even and one odd value).
+	Must be greater than or equal to ip_unprivileged_port_start.
 	The default values are 32768 and 60999 respectively.
 
 ip_local_reserved_ports - list of comma separated ranges
@@ -934,8 +938,8 @@ ip_unprivileged_port_start - INTEGER
 	This is a per-namespace sysctl.  It defines the first
 	unprivileged port in the network namespace.  Privileged ports
 	require root or CAP_NET_BIND_SERVICE in order to bind to them.
-	To disable all privileged ports, set this to 0.  It may not
-	overlap with the ip_local_reserved_ports range.
+	To disable all privileged ports, set this to 0.  They must not
+	overlap with the ip_local_port_range.
 
 	Default: 1024
 
@@ -991,12 +995,14 @@ icmp_ratelimit - INTEGER
 icmp_msgs_per_sec - INTEGER
 	Limit maximal number of ICMP packets sent per second from this host.
 	Only messages whose type matches icmp_ratemask (see below) are
-	controlled by this limit.
+	controlled by this limit. For security reasons, the precise count
+	of messages per second is randomized.
 	Default: 1000
 
 icmp_msgs_burst - INTEGER
 	icmp_msgs_per_sec controls number of ICMP packets sent per second,
 	while icmp_msgs_burst controls the burst size of these packets.
+	For security reasons, the precise burst size is randomized.
 	Default: 50
 
 icmp_ratemask - INTEGER

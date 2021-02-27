@@ -333,7 +333,6 @@ EXPORT_SYMBOL(__sk_backlog_rcv);
 static int sock_get_timeout(long timeo, void *optval, bool old_timeval)
 {
 	struct __kernel_sock_timeval tv;
-	int size;
 
 	if (timeo == MAX_SCHEDULE_TIMEOUT) {
 		tv.tv_sec = 0;
@@ -354,13 +353,11 @@ static int sock_get_timeout(long timeo, void *optval, bool old_timeval)
 		old_tv.tv_sec = tv.tv_sec;
 		old_tv.tv_usec = tv.tv_usec;
 		*(struct __kernel_old_timeval *)optval = old_tv;
-		size = sizeof(old_tv);
-	} else {
-		*(struct __kernel_sock_timeval *)optval = tv;
-		size = sizeof(tv);
+		return sizeof(old_tv);
 	}
 
-	return size;
+	*(struct __kernel_sock_timeval *)optval = tv;
+	return sizeof(tv);
 }
 
 static int sock_set_timeout(long *timeo_p, char __user *optval, int optlen, bool old_timeval)
@@ -522,7 +519,7 @@ int __sk_receive_skb(struct sock *sk, struct sk_buff *skb,
 		rc = sk_backlog_rcv(sk, skb);
 
 		mutex_release(&sk->sk_lock.dep_map, 1, _RET_IP_);
-	} else if (sk_add_backlog(sk, skb, sk->sk_rcvbuf)) {
+	} else if (sk_add_backlog(sk, skb, READ_ONCE(sk->sk_rcvbuf))) {
 		bh_unlock_sock(sk);
 		atomic_inc(&sk->sk_drops);
 		goto discard_and_relse;
@@ -687,7 +684,8 @@ out:
 	return ret;
 }
 
-static inline void sock_valbool_flag(struct sock *sk, int bit, int valbool)
+static inline void sock_valbool_flag(struct sock *sk, enum sock_flags bit,
+				     int valbool)
 {
 	if (valbool)
 		sock_set_flag(sk, bit);
@@ -709,7 +707,7 @@ bool sk_mc_loop(struct sock *sk)
 		return inet6_sk(sk)->mc_loop;
 #endif
 	}
-	WARN_ON(1);
+	WARN_ON_ONCE(1);
 	return true;
 }
 EXPORT_SYMBOL(sk_mc_loop);
@@ -785,7 +783,8 @@ set_sndbuf:
 		 */
 		val = min_t(int, val, INT_MAX / 2);
 		sk->sk_userlocks |= SOCK_SNDBUF_LOCK;
-		sk->sk_sndbuf = max_t(int, val * 2, SOCK_MIN_SNDBUF);
+		WRITE_ONCE(sk->sk_sndbuf,
+			   max_t(int, val * 2, SOCK_MIN_SNDBUF));
 		/* Wake up sending tasks if we upped the value. */
 		sk->sk_write_space(sk);
 		break;
@@ -831,7 +830,8 @@ set_rcvbuf:
 		 * returning the value we actually used in getsockopt
 		 * is the most desirable behavior.
 		 */
-		sk->sk_rcvbuf = max_t(int, val * 2, SOCK_MIN_RCVBUF);
+		WRITE_ONCE(sk->sk_rcvbuf,
+			   max_t(int, val * 2, SOCK_MIN_RCVBUF));
 		break;
 
 	case SO_RCVBUFFORCE:
@@ -974,7 +974,7 @@ set_rcvbuf:
 		if (sock->ops->set_rcvlowat)
 			ret = sock->ops->set_rcvlowat(sk, val);
 		else
-			sk->sk_rcvlowat = val ? : 1;
+			WRITE_ONCE(sk->sk_rcvlowat, val ? : 1);
 		break;
 
 	case SO_RCVTIMEO_OLD:
@@ -1677,6 +1677,7 @@ struct sock *sk_alloc(struct net *net, int family, gfp_t priority,
 		cgroup_sk_alloc(&sk->sk_cgrp_data);
 		sock_update_classid(&sk->sk_cgrp_data);
 		sock_update_netprioidx(&sk->sk_cgrp_data);
+		sk_tx_queue_clear(sk);
 	}
 
 	return sk;
@@ -1830,8 +1831,11 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		atomic_set(&newsk->sk_zckey, 0);
 
 		sock_reset_flag(newsk, SOCK_DONE);
-		mem_cgroup_sk_alloc(newsk);
-		cgroup_sk_alloc(&newsk->sk_cgrp_data);
+
+		/* sk->sk_memcg will be populated at accept() time */
+		newsk->sk_memcg = NULL;
+
+		cgroup_sk_clone(&newsk->sk_cgrp_data);
 
 		rcu_read_lock();
 		filter = rcu_dereference(sk->sk_filter);
@@ -1856,9 +1860,18 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 			goto out;
 		}
 		RCU_INIT_POINTER(newsk->sk_reuseport_cb, NULL);
-#ifdef CONFIG_BPF_SYSCALL
-		RCU_INIT_POINTER(newsk->sk_bpf_storage, NULL);
-#endif
+
+		if (bpf_sk_storage_clone(sk, newsk)) {
+			sk_free_unlock_clone(newsk);
+			newsk = NULL;
+			goto out;
+		}
+
+		/* Clear sk_user_data if parent had the pointer tagged
+		 * as not suitable for copying when cloning.
+		 */
+		if (sk_user_data_is_nocopy(newsk))
+			newsk->sk_user_data = NULL;
 
 		newsk->sk_err	   = 0;
 		newsk->sk_err_soft = 0;
@@ -1887,6 +1900,7 @@ struct sock *sk_clone_lock(const struct sock *sk, const gfp_t priority)
 		 */
 		sk_refcnt_debug_inc(newsk);
 		sk_set_socket(newsk, NULL);
+		sk_tx_queue_clear(newsk);
 		RCU_INIT_POINTER(newsk->sk_wq, NULL);
 
 		if (newsk->sk_prot->sockets_allocated)
@@ -2085,8 +2099,10 @@ EXPORT_SYMBOL(sock_i_ino);
 struct sk_buff *sock_wmalloc(struct sock *sk, unsigned long size, int force,
 			     gfp_t priority)
 {
-	if (force || refcount_read(&sk->sk_wmem_alloc) < sk->sk_sndbuf) {
+	if (force ||
+	    refcount_read(&sk->sk_wmem_alloc) < READ_ONCE(sk->sk_sndbuf)) {
 		struct sk_buff *skb = alloc_skb(size, priority);
+
 		if (skb) {
 			skb_set_owner_w(skb, sk);
 			return skb;
@@ -2187,7 +2203,7 @@ static long sock_wait_for_wmem(struct sock *sk, long timeo)
 			break;
 		set_bit(SOCK_NOSPACE, &sk->sk_socket->flags);
 		prepare_to_wait(sk_sleep(sk), &wait, TASK_INTERRUPTIBLE);
-		if (refcount_read(&sk->sk_wmem_alloc) < sk->sk_sndbuf)
+		if (refcount_read(&sk->sk_wmem_alloc) < READ_ONCE(sk->sk_sndbuf))
 			break;
 		if (sk->sk_shutdown & SEND_SHUTDOWN)
 			break;
@@ -2222,7 +2238,7 @@ struct sk_buff *sock_alloc_send_pskb(struct sock *sk, unsigned long header_len,
 		if (sk->sk_shutdown & SEND_SHUTDOWN)
 			goto failure;
 
-		if (sk_wmem_alloc_get(sk) < sk->sk_sndbuf)
+		if (sk_wmem_alloc_get(sk) < READ_ONCE(sk->sk_sndbuf))
 			break;
 
 		sk_set_bit(SOCKWQ_ASYNC_NOSPACE, sk);
@@ -2331,8 +2347,8 @@ static void sk_leave_memory_pressure(struct sock *sk)
 	} else {
 		unsigned long *memory_pressure = sk->sk_prot->memory_pressure;
 
-		if (memory_pressure && *memory_pressure)
-			*memory_pressure = 0;
+		if (memory_pressure && READ_ONCE(*memory_pressure))
+			WRITE_ONCE(*memory_pressure, 0);
 	}
 }
 
@@ -2803,7 +2819,7 @@ static void sock_def_write_space(struct sock *sk)
 	/* Do not wake up a writer until he can make "significant"
 	 * progress.  --DaveM
 	 */
-	if ((refcount_read(&sk->sk_wmem_alloc) << 1) <= sk->sk_sndbuf) {
+	if ((refcount_read(&sk->sk_wmem_alloc) << 1) <= READ_ONCE(sk->sk_sndbuf)) {
 		wq = rcu_dereference(sk->sk_wq);
 		if (skwq_has_sleeper(wq))
 			wake_up_interruptible_sync_poll(&wq->wait, EPOLLOUT |
@@ -2911,7 +2927,7 @@ void sock_init_data(struct socket *sock, struct sock *sk)
 
 	sk->sk_max_pacing_rate = ~0UL;
 	sk->sk_pacing_rate = ~0UL;
-	sk->sk_pacing_shift = 10;
+	WRITE_ONCE(sk->sk_pacing_shift, 10);
 	sk->sk_incoming_cpu = -1;
 
 	sk_rx_queue_clear(sk);
@@ -3008,7 +3024,7 @@ int sock_gettstamp(struct socket *sock, void __user *userstamp,
 		return -ENOENT;
 	if (ts.tv_sec == 0) {
 		ktime_t kt = ktime_get_real();
-		sock_write_timestamp(sk, kt);;
+		sock_write_timestamp(sk, kt);
 		ts = ktime_to_timespec64(kt);
 	}
 
@@ -3035,7 +3051,7 @@ int sock_gettstamp(struct socket *sock, void __user *userstamp,
 }
 EXPORT_SYMBOL(sock_gettstamp);
 
-void sock_enable_timestamp(struct sock *sk, int flag)
+void sock_enable_timestamp(struct sock *sk, enum sock_flags flag)
 {
 	if (!sock_flag(sk, flag)) {
 		unsigned long previous_flags = sk->sk_flags;
@@ -3201,13 +3217,13 @@ void sk_get_meminfo(const struct sock *sk, u32 *mem)
 	memset(mem, 0, sizeof(*mem) * SK_MEMINFO_VARS);
 
 	mem[SK_MEMINFO_RMEM_ALLOC] = sk_rmem_alloc_get(sk);
-	mem[SK_MEMINFO_RCVBUF] = sk->sk_rcvbuf;
+	mem[SK_MEMINFO_RCVBUF] = READ_ONCE(sk->sk_rcvbuf);
 	mem[SK_MEMINFO_WMEM_ALLOC] = sk_wmem_alloc_get(sk);
-	mem[SK_MEMINFO_SNDBUF] = sk->sk_sndbuf;
+	mem[SK_MEMINFO_SNDBUF] = READ_ONCE(sk->sk_sndbuf);
 	mem[SK_MEMINFO_FWD_ALLOC] = sk->sk_forward_alloc;
-	mem[SK_MEMINFO_WMEM_QUEUED] = sk->sk_wmem_queued;
+	mem[SK_MEMINFO_WMEM_QUEUED] = READ_ONCE(sk->sk_wmem_queued);
 	mem[SK_MEMINFO_OPTMEM] = atomic_read(&sk->sk_omem_alloc);
-	mem[SK_MEMINFO_BACKLOG] = sk->sk_backlog.len;
+	mem[SK_MEMINFO_BACKLOG] = READ_ONCE(sk->sk_backlog.len);
 	mem[SK_MEMINFO_DROPS] = atomic_read(&sk->sk_drops);
 }
 
@@ -3325,6 +3341,16 @@ static void sock_inuse_add(struct net *net, int val)
 }
 #endif
 
+static void tw_prot_cleanup(struct timewait_sock_ops *twsk_prot)
+{
+	if (!twsk_prot)
+		return;
+	kfree(twsk_prot->twsk_slab_name);
+	twsk_prot->twsk_slab_name = NULL;
+	kmem_cache_destroy(twsk_prot->twsk_slab);
+	twsk_prot->twsk_slab = NULL;
+}
+
 static void req_prot_cleanup(struct request_sock_ops *rsk_prot)
 {
 	if (!rsk_prot)
@@ -3395,7 +3421,7 @@ int proto_register(struct proto *prot, int alloc_slab)
 						  prot->slab_flags,
 						  NULL);
 			if (prot->twsk_prot->twsk_slab == NULL)
-				goto out_free_timewait_sock_slab_name;
+				goto out_free_timewait_sock_slab;
 		}
 	}
 
@@ -3403,15 +3429,15 @@ int proto_register(struct proto *prot, int alloc_slab)
 	ret = assign_proto_idx(prot);
 	if (ret) {
 		mutex_unlock(&proto_list_mutex);
-		goto out_free_timewait_sock_slab_name;
+		goto out_free_timewait_sock_slab;
 	}
 	list_add(&prot->node, &proto_list);
 	mutex_unlock(&proto_list_mutex);
 	return ret;
 
-out_free_timewait_sock_slab_name:
+out_free_timewait_sock_slab:
 	if (alloc_slab && prot->twsk_prot)
-		kfree(prot->twsk_prot->twsk_slab_name);
+		tw_prot_cleanup(prot->twsk_prot);
 out_free_request_sock_slab:
 	if (alloc_slab) {
 		req_prot_cleanup(prot->rsk_prot);
@@ -3435,12 +3461,7 @@ void proto_unregister(struct proto *prot)
 	prot->slab = NULL;
 
 	req_prot_cleanup(prot->rsk_prot);
-
-	if (prot->twsk_prot != NULL && prot->twsk_prot->twsk_slab != NULL) {
-		kmem_cache_destroy(prot->twsk_prot->twsk_slab);
-		kfree(prot->twsk_prot->twsk_slab_name);
-		prot->twsk_prot->twsk_slab = NULL;
-	}
+	tw_prot_cleanup(prot->twsk_prot);
 }
 EXPORT_SYMBOL(proto_unregister);
 

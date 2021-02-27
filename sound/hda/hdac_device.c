@@ -57,6 +57,7 @@ int snd_hdac_device_init(struct hdac_device *codec, struct hdac_bus *bus,
 	codec->addr = addr;
 	codec->type = HDA_DEV_CORE;
 	mutex_init(&codec->widget_lock);
+	mutex_init(&codec->regmap_lock);
 	pm_runtime_set_active(&codec->dev);
 	pm_runtime_get_noresume(&codec->dev);
 	atomic_set(&codec->in_pm, 0);
@@ -126,6 +127,8 @@ EXPORT_SYMBOL_GPL(snd_hdac_device_init);
 void snd_hdac_device_exit(struct hdac_device *codec)
 {
 	pm_runtime_put_noidle(&codec->dev);
+	/* keep balance of runtime PM child_count in parent device */
+	pm_runtime_set_suspended(&codec->dev);
 	snd_hdac_bus_remove_device(codec->bus, codec);
 	kfree(codec->vendor_name);
 	kfree(codec->chip_name);
@@ -203,7 +206,7 @@ EXPORT_SYMBOL_GPL(snd_hdac_device_set_chip_name);
  */
 int snd_hdac_codec_modalias(struct hdac_device *codec, char *buf, size_t size)
 {
-	return snprintf(buf, size, "hdaudio:v%08Xr%08Xa%02X\n",
+	return scnprintf(buf, size, "hdaudio:v%08Xr%08Xa%02X\n",
 			codec->vendor_id, codec->revision_id, codec->type);
 }
 EXPORT_SYMBOL_GPL(snd_hdac_codec_modalias);
@@ -639,7 +642,7 @@ struct hda_vendor_id {
 	const char *name;
 };
 
-static struct hda_vendor_id hda_vendor_ids[] = {
+static const struct hda_vendor_id hda_vendor_ids[] = {
 	{ 0x1002, "ATI" },
 	{ 0x1013, "Cirrus Logic" },
 	{ 0x1057, "Motorola" },
@@ -694,7 +697,7 @@ struct hda_rate_tbl {
 	(AC_FMT_BASE_##base##K | (((mult) - 1) << AC_FMT_MULT_SHIFT) | \
 	 (((div) - 1) << AC_FMT_DIV_SHIFT))
 
-static struct hda_rate_tbl rate_bits[] = {
+static const struct hda_rate_tbl rate_bits[] = {
 	/* rate in Hz, ALSA rate bitmask, HDA format value */
 
 	/* autodetected value used in snd_hda_query_supported_pcm */

@@ -12,25 +12,25 @@
 #include <linux/dma-contiguous.h>
 #include <linux/dma-noncoherent.h>
 #include <linux/pfn.h>
+#include <linux/vmalloc.h>
 #include <linux/set_memory.h>
 #include <linux/swiotlb.h>
 
 /*
- * Most architectures use ZONE_DMA for the first 16 Megabytes, but
- * some use it for entirely different regions:
+ * Most architectures use ZONE_DMA for the first 16 Megabytes, but some use it
+ * it for entirely different regions. In that case the arch code needs to
+ * override the variable below for dma-direct to work properly.
  */
-#ifndef ARCH_ZONE_DMA_BITS
-#define ARCH_ZONE_DMA_BITS 24
-#endif
+unsigned int zone_dma_bits __ro_after_init = 24;
 
 static void report_addr(struct device *dev, dma_addr_t dma_addr, size_t size)
 {
 	if (!dev->dma_mask) {
 		dev_err_once(dev, "DMA map on device without dma_mask\n");
-	} else if (*dev->dma_mask >= DMA_BIT_MASK(32) || dev->bus_dma_mask) {
+	} else if (*dev->dma_mask >= DMA_BIT_MASK(32) || dev->bus_dma_limit) {
 		dev_err_once(dev,
-			"overflow %pad+%zu of DMA mask %llx bus mask %llx\n",
-			&dma_addr, size, *dev->dma_mask, dev->bus_dma_mask);
+			"overflow %pad+%zu of DMA mask %llx bus limit %llx\n",
+			&dma_addr, size, *dev->dma_mask, dev->bus_dma_limit);
 	}
 	WARN_ON_ONCE(1);
 }
@@ -43,23 +43,29 @@ static inline dma_addr_t phys_to_dma_direct(struct device *dev,
 	return phys_to_dma(dev, phys);
 }
 
+static inline struct page *dma_direct_to_page(struct device *dev,
+		dma_addr_t dma_addr)
+{
+	return pfn_to_page(PHYS_PFN(dma_to_phys(dev, dma_addr)));
+}
+
 u64 dma_direct_get_required_mask(struct device *dev)
 {
-	u64 max_dma = phys_to_dma_direct(dev, (max_pfn - 1) << PAGE_SHIFT);
+	phys_addr_t phys = (phys_addr_t)(max_pfn - 1) << PAGE_SHIFT;
+	u64 max_dma = phys_to_dma_direct(dev, phys);
 
 	return (1ULL << (fls64(max_dma) - 1)) * 2 - 1;
 }
 
-static gfp_t __dma_direct_optimal_gfp_mask(struct device *dev, u64 dma_mask,
-		u64 *phys_mask)
+static gfp_t dma_direct_optimal_gfp_mask(struct device *dev, u64 dma_mask,
+				  u64 *phys_limit)
 {
-	if (dev->bus_dma_mask && dev->bus_dma_mask < dma_mask)
-		dma_mask = dev->bus_dma_mask;
+	u64 dma_limit = min_not_zero(dma_mask, dev->bus_dma_limit);
 
 	if (force_dma_unencrypted(dev))
-		*phys_mask = __dma_to_phys(dev, dma_mask);
+		*phys_limit = __dma_to_phys(dev, dma_limit);
 	else
-		*phys_mask = dma_to_phys(dev, dma_mask);
+		*phys_limit = dma_to_phys(dev, dma_limit);
 
 	/*
 	 * Optimistically try the zone that the physical address mask falls
@@ -69,9 +75,9 @@ static gfp_t __dma_direct_optimal_gfp_mask(struct device *dev, u64 dma_mask,
 	 * Note that GFP_DMA32 and GFP_DMA are no ops without the corresponding
 	 * zones.
 	 */
-	if (*phys_mask <= DMA_BIT_MASK(ARCH_ZONE_DMA_BITS))
+	if (*phys_limit <= DMA_BIT_MASK(zone_dma_bits))
 		return GFP_DMA;
-	if (*phys_mask <= DMA_BIT_MASK(32))
+	if (*phys_limit <= DMA_BIT_MASK(32))
 		return GFP_DMA32;
 	return 0;
 }
@@ -79,38 +85,72 @@ static gfp_t __dma_direct_optimal_gfp_mask(struct device *dev, u64 dma_mask,
 static bool dma_coherent_ok(struct device *dev, phys_addr_t phys, size_t size)
 {
 	return phys_to_dma_direct(dev, phys) + size - 1 <=
-			min_not_zero(dev->coherent_dma_mask, dev->bus_dma_mask);
+			min_not_zero(dev->coherent_dma_mask, dev->bus_dma_limit);
+}
+
+/*
+ * Decrypting memory is allowed to block, so if this device requires
+ * unencrypted memory it must come from atomic pools.
+ */
+static inline bool dma_should_alloc_from_pool(struct device *dev, gfp_t gfp,
+					      unsigned long attrs)
+{
+	if (!IS_ENABLED(CONFIG_DMA_COHERENT_POOL))
+		return false;
+	if (gfpflags_allow_blocking(gfp))
+		return false;
+	if (force_dma_unencrypted(dev))
+		return true;
+	if (!IS_ENABLED(CONFIG_DMA_DIRECT_REMAP))
+		return false;
+	if (dma_alloc_need_uncached(dev, attrs))
+		return true;
+	return false;
+}
+
+static inline bool dma_should_free_from_pool(struct device *dev,
+					     unsigned long attrs)
+{
+	if (IS_ENABLED(CONFIG_DMA_COHERENT_POOL))
+		return true;
+	if ((attrs & DMA_ATTR_NO_KERNEL_MAPPING) &&
+	    !force_dma_unencrypted(dev))
+		return false;
+	if (IS_ENABLED(CONFIG_DMA_DIRECT_REMAP))
+		return true;
+	return false;
 }
 
 struct page *__dma_direct_alloc_pages(struct device *dev, size_t size,
-		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
+		gfp_t gfp, unsigned long attrs)
 {
-	size_t alloc_size = PAGE_ALIGN(size);
 	int node = dev_to_node(dev);
 	struct page *page = NULL;
-	u64 phys_mask;
+	u64 phys_limit;
+
+	WARN_ON_ONCE(!PAGE_ALIGNED(size));
 
 	if (attrs & DMA_ATTR_NO_WARN)
 		gfp |= __GFP_NOWARN;
 
 	/* we always manually zero the memory once we are done: */
 	gfp &= ~__GFP_ZERO;
-	gfp |= __dma_direct_optimal_gfp_mask(dev, dev->coherent_dma_mask,
-			&phys_mask);
-	page = dma_alloc_contiguous(dev, alloc_size, gfp);
+	gfp |= dma_direct_optimal_gfp_mask(dev, dev->coherent_dma_mask,
+					   &phys_limit);
+	page = dma_alloc_contiguous(dev, size, gfp);
 	if (page && !dma_coherent_ok(dev, page_to_phys(page), size)) {
-		dma_free_contiguous(dev, page, alloc_size);
+		dma_free_contiguous(dev, page, size);
 		page = NULL;
 	}
 again:
 	if (!page)
-		page = alloc_pages_node(node, gfp, get_order(alloc_size));
+		page = alloc_pages_node(node, gfp, get_order(size));
 	if (page && !dma_coherent_ok(dev, page_to_phys(page), size)) {
 		dma_free_contiguous(dev, page, size);
 		page = NULL;
 
 		if (IS_ENABLED(CONFIG_ZONE_DMA32) &&
-		    phys_mask < DMA_BIT_MASK(64) &&
+		    phys_limit < DMA_BIT_MASK(64) &&
 		    !(gfp & (GFP_DMA32 | GFP_DMA))) {
 			gfp |= GFP_DMA32;
 			goto again;
@@ -130,8 +170,23 @@ void *dma_direct_alloc_pages(struct device *dev, size_t size,
 {
 	struct page *page;
 	void *ret;
+	int err;
 
-	page = __dma_direct_alloc_pages(dev, size, dma_handle, gfp, attrs);
+	size = PAGE_ALIGN(size);
+
+	if (dma_should_alloc_from_pool(dev, gfp, attrs)) {
+		u64 phys_mask;
+
+		gfp |= dma_direct_optimal_gfp_mask(dev, dev->coherent_dma_mask,
+				&phys_mask);
+		page = dma_alloc_from_pool(dev, size, &ret, gfp,
+				dma_coherent_ok);
+		if (!page)
+			return NULL;
+		goto done;
+	}
+
+	page = __dma_direct_alloc_pages(dev, size, gfp, attrs);
 	if (!page)
 		return NULL;
 
@@ -140,9 +195,31 @@ void *dma_direct_alloc_pages(struct device *dev, size_t size,
 		/* remove any dirty cache lines on the kernel alias */
 		if (!PageHighMem(page))
 			arch_dma_prep_coherent(page, size);
-		*dma_handle = phys_to_dma(dev, page_to_phys(page));
 		/* return the page pointer as the opaque cookie */
-		return page;
+		ret = page;
+		goto done;
+	}
+
+	if ((IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
+	     dma_alloc_need_uncached(dev, attrs)) ||
+	    (IS_ENABLED(CONFIG_DMA_REMAP) && PageHighMem(page))) {
+		/* remove any dirty cache lines on the kernel alias */
+		arch_dma_prep_coherent(page, size);
+
+		/* create a coherent mapping */
+		ret = dma_common_contiguous_remap(page, size,
+				dma_pgprot(dev, PAGE_KERNEL, attrs),
+				__builtin_return_address(0));
+		if (!ret)
+			goto out_free_pages;
+		if (force_dma_unencrypted(dev)) {
+			err = set_memory_decrypted((unsigned long)ret,
+						   1 << get_order(size));
+			if (err)
+				goto out_free_pages;
+		}
+		memset(ret, 0, size);
+		goto done;
 	}
 
 	if (PageHighMem(page)) {
@@ -153,31 +230,44 @@ void *dma_direct_alloc_pages(struct device *dev, size_t size,
 		 * so log an error and fail.
 		 */
 		dev_info(dev, "Rejecting highmem page from CMA.\n");
-		__dma_direct_free_pages(dev, size, page);
-		return NULL;
+		goto out_free_pages;
 	}
 
 	ret = page_address(page);
 	if (force_dma_unencrypted(dev)) {
-		set_memory_decrypted((unsigned long)ret, 1 << get_order(size));
-		*dma_handle = __phys_to_dma(dev, page_to_phys(page));
-	} else {
-		*dma_handle = phys_to_dma(dev, page_to_phys(page));
+		err = set_memory_decrypted((unsigned long)ret,
+					   1 << get_order(size));
+		if (err)
+			goto out_free_pages;
 	}
+
 	memset(ret, 0, size);
 
-	if (IS_ENABLED(CONFIG_ARCH_HAS_UNCACHED_SEGMENT) &&
+	if (IS_ENABLED(CONFIG_ARCH_HAS_DMA_SET_UNCACHED) &&
 	    dma_alloc_need_uncached(dev, attrs)) {
 		arch_dma_prep_coherent(page, size);
-		ret = uncached_kernel_address(ret);
+		ret = arch_dma_set_uncached(ret, size);
+		if (IS_ERR(ret))
+			goto out_encrypt_pages;
 	}
-
+done:
+	if (force_dma_unencrypted(dev))
+		*dma_handle = __phys_to_dma(dev, page_to_phys(page));
+	else
+		*dma_handle = phys_to_dma(dev, page_to_phys(page));
 	return ret;
-}
 
-void __dma_direct_free_pages(struct device *dev, size_t size, struct page *page)
-{
+out_encrypt_pages:
+	if (force_dma_unencrypted(dev)) {
+		err = set_memory_encrypted((unsigned long)page_address(page),
+					   1 << get_order(size));
+		/* If memory cannot be re-encrypted, it must be leaked */
+		if (err)
+			return NULL;
+	}
+out_free_pages:
 	dma_free_contiguous(dev, page, size);
+	return NULL;
 }
 
 void dma_direct_free_pages(struct device *dev, size_t size, void *cpu_addr,
@@ -185,26 +275,32 @@ void dma_direct_free_pages(struct device *dev, size_t size, void *cpu_addr,
 {
 	unsigned int page_order = get_order(size);
 
+	/* If cpu_addr is not from an atomic pool, dma_free_from_pool() fails */
+	if (dma_should_free_from_pool(dev, attrs) &&
+	    dma_free_from_pool(dev, cpu_addr, PAGE_ALIGN(size)))
+		return;
+
 	if ((attrs & DMA_ATTR_NO_KERNEL_MAPPING) &&
 	    !force_dma_unencrypted(dev)) {
 		/* cpu_addr is a struct page cookie, not a kernel address */
-		__dma_direct_free_pages(dev, size, cpu_addr);
+		dma_free_contiguous(dev, cpu_addr, size);
 		return;
 	}
 
 	if (force_dma_unencrypted(dev))
 		set_memory_encrypted((unsigned long)cpu_addr, 1 << page_order);
 
-	if (IS_ENABLED(CONFIG_ARCH_HAS_UNCACHED_SEGMENT) &&
-	    dma_alloc_need_uncached(dev, attrs))
-		cpu_addr = cached_kernel_address(cpu_addr);
-	__dma_direct_free_pages(dev, size, virt_to_page(cpu_addr));
+	if (IS_ENABLED(CONFIG_DMA_REMAP) && is_vmalloc_addr(cpu_addr))
+		vunmap(cpu_addr);
+
+	dma_free_contiguous(dev, dma_direct_to_page(dev, dma_addr), size);
 }
 
 void *dma_direct_alloc(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
 {
-	if (!IS_ENABLED(CONFIG_ARCH_HAS_UNCACHED_SEGMENT) &&
+	if (!IS_ENABLED(CONFIG_ARCH_HAS_DMA_SET_UNCACHED) &&
+	    !IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
 	    dma_alloc_need_uncached(dev, attrs))
 		return arch_dma_alloc(dev, size, dma_handle, gfp, attrs);
 	return dma_direct_alloc_pages(dev, size, dma_handle, gfp, attrs);
@@ -213,7 +309,8 @@ void *dma_direct_alloc(struct device *dev, size_t size,
 void dma_direct_free(struct device *dev, size_t size,
 		void *cpu_addr, dma_addr_t dma_addr, unsigned long attrs)
 {
-	if (!IS_ENABLED(CONFIG_ARCH_HAS_UNCACHED_SEGMENT) &&
+	if (!IS_ENABLED(CONFIG_ARCH_HAS_DMA_SET_UNCACHED) &&
+	    !IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
 	    dma_alloc_need_uncached(dev, attrs))
 		arch_dma_free(dev, size, cpu_addr, dma_addr, attrs);
 	else
@@ -326,7 +423,7 @@ static inline bool dma_direct_possible(struct device *dev, dma_addr_t dma_addr,
 		size_t size)
 {
 	return swiotlb_force != SWIOTLB_FORCE &&
-		dma_capable(dev, dma_addr, size);
+		dma_capable(dev, dma_addr, size, true);
 }
 
 dma_addr_t dma_direct_map_page(struct device *dev, struct page *page,
@@ -375,7 +472,7 @@ dma_addr_t dma_direct_map_resource(struct device *dev, phys_addr_t paddr,
 {
 	dma_addr_t dma_addr = paddr;
 
-	if (unlikely(!dma_direct_possible(dev, dma_addr, size))) {
+	if (unlikely(!dma_capable(dev, dma_addr, size, false))) {
 		report_addr(dev, dma_addr, size);
 		return DMA_MAPPING_ERROR;
 	}
@@ -384,28 +481,79 @@ dma_addr_t dma_direct_map_resource(struct device *dev, phys_addr_t paddr,
 }
 EXPORT_SYMBOL(dma_direct_map_resource);
 
-/*
- * Because 32-bit DMA masks are so common we expect every architecture to be
- * able to satisfy them - either by not supporting more physical memory, or by
- * providing a ZONE_DMA32.  If neither is the case, the architecture needs to
- * use an IOMMU instead of the direct mapping.
- */
+int dma_direct_get_sgtable(struct device *dev, struct sg_table *sgt,
+		void *cpu_addr, dma_addr_t dma_addr, size_t size,
+		unsigned long attrs)
+{
+	struct page *page = dma_direct_to_page(dev, dma_addr);
+	int ret;
+
+	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
+	if (!ret)
+		sg_set_page(sgt->sgl, page, PAGE_ALIGN(size), 0);
+	return ret;
+}
+
+#ifdef CONFIG_MMU
+bool dma_direct_can_mmap(struct device *dev)
+{
+	return dev_is_dma_coherent(dev) ||
+		IS_ENABLED(CONFIG_DMA_NONCOHERENT_MMAP);
+}
+
+int dma_direct_mmap(struct device *dev, struct vm_area_struct *vma,
+		void *cpu_addr, dma_addr_t dma_addr, size_t size,
+		unsigned long attrs)
+{
+	unsigned long user_count = vma_pages(vma);
+	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	unsigned long pfn = PHYS_PFN(dma_to_phys(dev, dma_addr));
+	int ret = -ENXIO;
+
+	vma->vm_page_prot = dma_pgprot(dev, vma->vm_page_prot, attrs);
+
+	if (dma_mmap_from_dev_coherent(dev, vma, cpu_addr, size, &ret))
+		return ret;
+
+	if (vma->vm_pgoff >= count || user_count > count - vma->vm_pgoff)
+		return -ENXIO;
+	return remap_pfn_range(vma, vma->vm_start, pfn + vma->vm_pgoff,
+			user_count << PAGE_SHIFT, vma->vm_page_prot);
+}
+#else /* CONFIG_MMU */
+bool dma_direct_can_mmap(struct device *dev)
+{
+	return false;
+}
+
+int dma_direct_mmap(struct device *dev, struct vm_area_struct *vma,
+		void *cpu_addr, dma_addr_t dma_addr, size_t size,
+		unsigned long attrs)
+{
+	return -ENXIO;
+}
+#endif /* CONFIG_MMU */
+
 int dma_direct_supported(struct device *dev, u64 mask)
 {
-	u64 min_mask;
+	u64 min_mask = (max_pfn - 1) << PAGE_SHIFT;
 
-	if (IS_ENABLED(CONFIG_ZONE_DMA))
-		min_mask = DMA_BIT_MASK(ARCH_ZONE_DMA_BITS);
-	else
-		min_mask = DMA_BIT_MASK(32);
-
-	min_mask = min_t(u64, min_mask, (max_pfn - 1) << PAGE_SHIFT);
+	/*
+	 * Because 32-bit DMA masks are so common we expect every architecture
+	 * to be able to satisfy them - either by not supporting more physical
+	 * memory, or by providing a ZONE_DMA32.  If neither is the case, the
+	 * architecture needs to use an IOMMU instead of the direct mapping.
+	 */
+	if (mask >= DMA_BIT_MASK(32))
+		return 1;
 
 	/*
 	 * This check needs to be against the actual bit mask value, so
 	 * use __phys_to_dma() here so that the SME encryption mask isn't
 	 * part of the check.
-	 */
+ 	 */
+	if (IS_ENABLED(CONFIG_ZONE_DMA))
+		min_mask = min_t(u64, min_mask, DMA_BIT_MASK(zone_dma_bits));
 	return mask >= __phys_to_dma(dev, min_mask);
 }
 

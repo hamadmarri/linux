@@ -181,15 +181,18 @@ static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 				   struct tipc_nl_compat_msg *msg,
 				   struct sk_buff *arg)
 {
+	struct genl_dumpit_info info;
 	int len = 0;
 	int err;
 	struct sk_buff *buf;
 	struct nlmsghdr *nlmsg;
 	struct netlink_callback cb;
+	struct nlattr **attrbuf;
 
 	memset(&cb, 0, sizeof(cb));
 	cb.nlh = (struct nlmsghdr *)arg->data;
 	cb.skb = arg;
+	cb.data = &info;
 
 	buf = nlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (!buf)
@@ -201,19 +204,35 @@ static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 		return -ENOMEM;
 	}
 
+	attrbuf = kmalloc_array(tipc_genl_family.maxattr + 1,
+				sizeof(struct nlattr *), GFP_KERNEL);
+	if (!attrbuf) {
+		err = -ENOMEM;
+		goto err_out;
+	}
+
+	info.attrs = attrbuf;
+	err = nlmsg_parse_deprecated(cb.nlh, GENL_HDRLEN, attrbuf,
+				     tipc_genl_family.maxattr,
+				     tipc_genl_family.policy, NULL);
+	if (err)
+		goto err_out;
+
 	do {
 		int rem;
 
 		len = (*cmd->dumpit)(buf, &cb);
 
 		nlmsg_for_each_msg(nlmsg, nlmsg_hdr(buf), len, rem) {
-			struct nlattr **attrs;
-
-			err = tipc_nlmsg_parse(nlmsg, &attrs);
+			err = nlmsg_parse_deprecated(nlmsg, GENL_HDRLEN,
+						     attrbuf,
+						     tipc_genl_family.maxattr,
+						     tipc_genl_family.policy,
+						     NULL);
 			if (err)
 				goto err_out;
 
-			err = (*cmd->format)(msg, attrs);
+			err = (*cmd->format)(msg, attrbuf);
 			if (err)
 				goto err_out;
 
@@ -231,6 +250,7 @@ static int __tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 	err = 0;
 
 err_out:
+	kfree(attrbuf);
 	tipc_dump_done(&cb);
 	kfree_skb(buf);
 
@@ -255,8 +275,9 @@ err_out:
 static int tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 				 struct tipc_nl_compat_msg *msg)
 {
-	int err;
+	struct nlmsghdr *nlh;
 	struct sk_buff *arg;
+	int err;
 
 	if (msg->req_type && (!msg->req_size ||
 			      !TLV_CHECK_TYPE(msg->req, msg->req_type)))
@@ -284,6 +305,15 @@ static int tipc_nl_compat_dumpit(struct tipc_nl_compat_cmd_dump *cmd,
 		msg->rep = NULL;
 		return -ENOMEM;
 	}
+
+	nlh = nlmsg_put(arg, 0, 0, tipc_genl_family.id, 0, NLM_F_MULTI);
+	if (!nlh) {
+		kfree_skb(arg);
+		kfree_skb(msg->rep);
+		msg->rep = NULL;
+		return -EMSGSIZE;
+	}
+	nlmsg_end(arg, nlh);
 
 	err = __tipc_nl_compat_dumpit(cmd, msg, arg);
 	if (err) {

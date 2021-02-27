@@ -753,7 +753,7 @@ static int mv_xor_v2_probe(struct platform_device *pdev)
 	}
 
 	xor_dev->clk = devm_clk_get(&pdev->dev, NULL);
-	if (IS_ERR(xor_dev->clk) && PTR_ERR(xor_dev->clk) == -EPROBE_DEFER) {
+	if (PTR_ERR(xor_dev->clk) == -EPROBE_DEFER) {
 		ret = EPROBE_DEFER;
 		goto disable_reg_clk;
 	}
@@ -769,8 +769,10 @@ static int mv_xor_v2_probe(struct platform_device *pdev)
 		goto disable_clk;
 
 	msi_desc = first_msi_entry(&pdev->dev);
-	if (!msi_desc)
+	if (!msi_desc) {
+		ret = -ENODEV;
 		goto free_msi_irqs;
+	}
 	xor_dev->msi_desc = msi_desc;
 
 	ret = devm_request_irq(&pdev->dev, msi_desc->irq,

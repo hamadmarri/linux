@@ -7,6 +7,7 @@
 #include <linux/export.h>
 #include <linux/extable.h>
 #include <linux/moduleloader.h>
+#include <linux/module_signature.h>
 #include <linux/trace_events.h>
 #include <linux/init.h>
 #include <linux/kallsyms.h>
@@ -76,6 +77,22 @@
 /* If this is set, the section belongs in the init part of the module */
 #define INIT_OFFSET_MASK (1UL << (BITS_PER_LONG-1))
 
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+/* Allow unsupported modules switch. */
+#ifdef UNSUPPORTED_MODULES
+int suse_unsupported = UNSUPPORTED_MODULES;
+#else
+int suse_unsupported = 2;  /* don't warn when loading unsupported modules. */
+#endif
+
+static int __init unsupported_setup(char *str)
+{
+	get_option(&str, &suse_unsupported);
+	return 1;
+}
+__setup("unsupported=", unsupported_setup);
+#endif
+
 /*
  * Mutex protects:
  * 1) List of modules (also safely readable with preempt_disable),
@@ -87,8 +104,9 @@ EXPORT_SYMBOL_GPL(module_mutex);
 static LIST_HEAD(modules);
 
 /* Work queue for freeing init sections in success case */
-static struct work_struct init_free_wq;
-static struct llist_head init_free_list;
+static void do_free_init(struct work_struct *w);
+static DECLARE_WORK(init_free_wq, do_free_init);
+static LLIST_HEAD(init_free_list);
 
 #ifdef CONFIG_MODULES_TREE_LOOKUP
 
@@ -541,6 +559,17 @@ static const char *kernel_symbol_name(const struct kernel_symbol *sym)
 	return offset_to_ptr(&sym->name_offset);
 #else
 	return sym->name;
+#endif
+}
+
+static const char *kernel_symbol_namespace(const struct kernel_symbol *sym)
+{
+#ifdef CONFIG_HAVE_ARCH_PREL32_RELOCATIONS
+	if (!sym->namespace_offset)
+		return NULL;
+	return offset_to_ptr(&sym->namespace_offset);
+#else
+	return sym->namespace;
 #endif
 }
 
@@ -1024,6 +1053,8 @@ SYSCALL_DEFINE2(delete_module, const char __user *, name_user,
 	strlcpy(last_unloaded_module, mod->name, sizeof(last_unloaded_module));
 
 	free_module(mod);
+	/* someone could wait for the module in add_unformed_module() */
+	wake_up_all(&module_wq);
 	return 0;
 out:
 	mutex_unlock(&module_mutex);
@@ -1174,6 +1205,12 @@ static size_t module_flags_taint(struct module *mod, char *buf)
 			buf[l++] = taint_flags[i].c_true;
 	}
 
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	if (mod->taints & (1 << TAINT_NO_SUPPORT))
+		buf[l++] = 'N';
+	if (mod->taints & (1 << TAINT_EXTERNAL_SUPPORT))
+		buf[l++] = 'X';
+#endif
 	return l;
 }
 
@@ -1245,6 +1282,33 @@ static ssize_t show_taint(struct module_attribute *mattr,
 static struct module_attribute modinfo_taint =
 	__ATTR(taint, 0444, show_taint, NULL);
 
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+static void setup_modinfo_supported(struct module *mod, const char *s)
+{
+	if (!s) {
+		mod->taints |= (1 << TAINT_NO_SUPPORT);
+		return;
+	}
+
+	if (strcmp(s, "external") == 0)
+		mod->taints |= (1 << TAINT_EXTERNAL_SUPPORT);
+	else if (strcmp(s, "yes"))
+		mod->taints |= (1 << TAINT_NO_SUPPORT);
+}
+
+static ssize_t show_modinfo_supported(struct module_attribute *mattr,
+				      struct module_kobject *mk, char *buffer)
+{
+	return sprintf(buffer, "%s\n", supported_printable(mk->mod->taints));
+}
+
+static struct module_attribute modinfo_supported = {
+	.attr = { .name = "supported", .mode = 0444 },
+	.show = show_modinfo_supported,
+	.setup = setup_modinfo_supported,
+};
+#endif
+
 static struct module_attribute *modinfo_attrs[] = {
 	&module_uevent,
 	&modinfo_version,
@@ -1253,6 +1317,9 @@ static struct module_attribute *modinfo_attrs[] = {
 	&modinfo_coresize,
 	&modinfo_initsize,
 	&modinfo_taint,
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	&modinfo_supported,
+#endif
 #ifdef CONFIG_MODULE_UNLOAD
 	&modinfo_refcnt,
 #endif
@@ -1379,6 +1446,41 @@ static inline int same_magic(const char *amagic, const char *bmagic,
 }
 #endif /* CONFIG_MODVERSIONS */
 
+static char *get_modinfo(const struct load_info *info, const char *tag);
+static char *get_next_modinfo(const struct load_info *info, const char *tag,
+			      char *prev);
+
+static int verify_namespace_is_imported(const struct load_info *info,
+					const struct kernel_symbol *sym,
+					struct module *mod)
+{
+	const char *namespace;
+	char *imported_namespace;
+
+	namespace = kernel_symbol_namespace(sym);
+	if (namespace && namespace[0]) {
+		imported_namespace = get_modinfo(info, "import_ns");
+		while (imported_namespace) {
+			if (strcmp(namespace, imported_namespace) == 0)
+				return 0;
+			imported_namespace = get_next_modinfo(
+				info, "import_ns", imported_namespace);
+		}
+#ifdef CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS
+		pr_warn(
+#else
+		pr_err(
+#endif
+			"%s: module uses symbol (%s) from namespace %s, but does not import it.\n",
+			mod->name, kernel_symbol_name(sym), namespace);
+#ifndef CONFIG_MODULE_ALLOW_MISSING_NAMESPACE_IMPORTS
+		return -EINVAL;
+#endif
+	}
+	return 0;
+}
+
+
 /* Resolve a symbol for this module.  I.e. if we find one, record usage. */
 static const struct kernel_symbol *resolve_symbol(struct module *mod,
 						  const struct load_info *info,
@@ -1404,6 +1506,12 @@ static const struct kernel_symbol *resolve_symbol(struct module *mod,
 
 	if (!check_version(info, name, mod, crc)) {
 		sym = ERR_PTR(-EINVAL);
+		goto getname;
+	}
+
+	err = verify_namespace_is_imported(info, sym, mod);
+	if (err) {
+		sym = ERR_PTR(err);
 		goto getname;
 	}
 
@@ -1452,8 +1560,7 @@ static inline bool sect_empty(const Elf_Shdr *sect)
 }
 
 struct module_sect_attr {
-	struct module_attribute mattr;
-	char *name;
+	struct bin_attribute battr;
 	unsigned long address;
 };
 
@@ -1463,13 +1570,34 @@ struct module_sect_attrs {
 	struct module_sect_attr attrs[0];
 };
 
-static ssize_t module_sect_show(struct module_attribute *mattr,
-				struct module_kobject *mk, char *buf)
+#define MODULE_SECT_READ_SIZE (3 /* "0x", "\n" */ + (BITS_PER_LONG / 4))
+static ssize_t module_sect_read(struct file *file, struct kobject *kobj,
+				struct bin_attribute *battr,
+				char *buf, loff_t pos, size_t count)
 {
 	struct module_sect_attr *sattr =
-		container_of(mattr, struct module_sect_attr, mattr);
-	return sprintf(buf, "0x%px\n", kptr_restrict < 2 ?
-		       (void *)sattr->address : NULL);
+		container_of(battr, struct module_sect_attr, battr);
+	char bounce[MODULE_SECT_READ_SIZE + 1];
+	size_t wrote;
+
+	if (pos != 0)
+		return -EINVAL;
+
+	/*
+	 * Since we're a binary read handler, we must account for the
+	 * trailing NUL byte that sprintf will write: if "buf" is
+	 * too small to hold the NUL, or the NUL is exactly the last
+	 * byte, the read will look like it got truncated by one byte.
+	 * Since there is no way to ask sprintf nicely to not write
+	 * the NUL, we have to use a bounce buffer.
+	 */
+	wrote = scnprintf(bounce, sizeof(bounce), "0x%px\n",
+			 kallsyms_show_value(file->f_cred)
+				? (void *)sattr->address : NULL);
+	count = min(count, wrote);
+	memcpy(buf, bounce, count);
+
+	return count;
 }
 
 static void free_sect_attrs(struct module_sect_attrs *sect_attrs)
@@ -1477,7 +1605,7 @@ static void free_sect_attrs(struct module_sect_attrs *sect_attrs)
 	unsigned int section;
 
 	for (section = 0; section < sect_attrs->nsections; section++)
-		kfree(sect_attrs->attrs[section].name);
+		kfree(sect_attrs->attrs[section].battr.attr.name);
 	kfree(sect_attrs);
 }
 
@@ -1486,42 +1614,41 @@ static void add_sect_attrs(struct module *mod, const struct load_info *info)
 	unsigned int nloaded = 0, i, size[2];
 	struct module_sect_attrs *sect_attrs;
 	struct module_sect_attr *sattr;
-	struct attribute **gattr;
+	struct bin_attribute **gattr;
 
 	/* Count loaded sections and allocate structures */
 	for (i = 0; i < info->hdr->e_shnum; i++)
 		if (!sect_empty(&info->sechdrs[i]))
 			nloaded++;
 	size[0] = ALIGN(struct_size(sect_attrs, attrs, nloaded),
-			sizeof(sect_attrs->grp.attrs[0]));
-	size[1] = (nloaded + 1) * sizeof(sect_attrs->grp.attrs[0]);
+			sizeof(sect_attrs->grp.bin_attrs[0]));
+	size[1] = (nloaded + 1) * sizeof(sect_attrs->grp.bin_attrs[0]);
 	sect_attrs = kzalloc(size[0] + size[1], GFP_KERNEL);
 	if (sect_attrs == NULL)
 		return;
 
 	/* Setup section attributes. */
 	sect_attrs->grp.name = "sections";
-	sect_attrs->grp.attrs = (void *)sect_attrs + size[0];
+	sect_attrs->grp.bin_attrs = (void *)sect_attrs + size[0];
 
 	sect_attrs->nsections = 0;
 	sattr = &sect_attrs->attrs[0];
-	gattr = &sect_attrs->grp.attrs[0];
+	gattr = &sect_attrs->grp.bin_attrs[0];
 	for (i = 0; i < info->hdr->e_shnum; i++) {
 		Elf_Shdr *sec = &info->sechdrs[i];
 		if (sect_empty(sec))
 			continue;
+		sysfs_bin_attr_init(&sattr->battr);
 		sattr->address = sec->sh_addr;
-		sattr->name = kstrdup(info->secstrings + sec->sh_name,
-					GFP_KERNEL);
-		if (sattr->name == NULL)
+		sattr->battr.attr.name =
+			kstrdup(info->secstrings + sec->sh_name, GFP_KERNEL);
+		if (sattr->battr.attr.name == NULL)
 			goto out;
 		sect_attrs->nsections++;
-		sysfs_attr_init(&sattr->mattr.attr);
-		sattr->mattr.show = module_sect_show;
-		sattr->mattr.store = NULL;
-		sattr->mattr.attr.name = sattr->name;
-		sattr->mattr.attr.mode = S_IRUSR;
-		*(gattr++) = &(sattr++)->mattr.attr;
+		sattr->battr.read = module_sect_read;
+		sattr->battr.size = MODULE_SECT_READ_SIZE;
+		sattr->battr.attr.mode = 0400;
+		*(gattr++) = &(sattr++)->battr;
 	}
 	*gattr = NULL;
 
@@ -1611,7 +1738,7 @@ static void add_notes_attrs(struct module *mod, const struct load_info *info)
 			continue;
 		if (info->sechdrs[i].sh_type == SHT_NOTE) {
 			sysfs_bin_attr_init(nattr);
-			nattr->attr.name = mod->sect_attrs->attrs[loaded].name;
+			nattr->attr.name = mod->sect_attrs->attrs[loaded].battr.attr.name;
 			nattr->attr.mode = S_IRUGO;
 			nattr->size = info->sechdrs[i].sh_size;
 			nattr->private = (void *) info->sechdrs[i].sh_addr;
@@ -1786,7 +1913,6 @@ static int mod_sysfs_init(struct module *mod)
 	if (err)
 		mod_kobject_put(mod);
 
-	/* delay uevent until full sysfs population */
 out:
 	return err;
 }
@@ -1823,9 +1949,37 @@ static int mod_sysfs_setup(struct module *mod,
 	add_sect_attrs(mod, info);
 	add_notes_attrs(mod, info);
 
-	kobject_uevent(&mod->mkobj.kobj, KOBJ_ADD);
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	if (mod->taints & (1 << TAINT_EXTERNAL_SUPPORT)) {
+		pr_notice("%s: externally supported module, "
+			  "setting X kernel taint flag.\n", mod->name);
+		add_taint(TAINT_EXTERNAL_SUPPORT, LOCKDEP_STILL_OK);
+	} else if (mod->taints & (1 << TAINT_NO_SUPPORT)) {
+		if (suse_unsupported == 0) {
+			printk(KERN_WARNING "%s: module not supported by "
+			       "SUSE, refusing to load. To override, echo "
+			       "1 > /proc/sys/kernel/unsupported\n", mod->name);
+			err = -ENOEXEC;
+			goto out_remove_attrs;
+		}
+		add_taint(TAINT_NO_SUPPORT, LOCKDEP_STILL_OK);
+		if (suse_unsupported == 1) {
+			printk(KERN_WARNING "%s: module is not supported by "
+			       "SUSE. Our support organization may not be "
+			       "able to address your support request if it "
+			       "involves a kernel fault.\n", mod->name);
+		}
+	}
+#endif
+
 	return 0;
 
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+out_remove_attrs:
+	remove_notes_attrs(mod);
+	remove_sect_attrs(mod);
+	del_usage_links(mod);
+#endif
 out_unreg_modinfo_attrs:
 	module_remove_modinfo_attrs(mod, -1);
 out_unreg_param:
@@ -2320,11 +2474,13 @@ static int apply_relocations(struct module *mod, const struct load_info *info)
 		if (!(info->sechdrs[infosec].sh_flags & SHF_ALLOC))
 			continue;
 
-		/* Livepatch relocation sections are applied by livepatch */
 		if (info->sechdrs[i].sh_flags & SHF_RELA_LIVEPATCH)
-			continue;
-
-		if (info->sechdrs[i].sh_type == SHT_REL)
+			err = klp_apply_section_relocs(mod, info->sechdrs,
+						       info->secstrings,
+						       info->strtab,
+						       info->index.sym, i,
+						       NULL);
+		else if (info->sechdrs[i].sh_type == SHT_REL)
 			err = apply_relocate(info->sechdrs, info->strtab,
 					     info->index.sym, i, mod);
 		else if (info->sechdrs[i].sh_type == SHT_RELA)
@@ -2481,7 +2637,8 @@ static char *next_string(char *string, unsigned long *secsize)
 	return string;
 }
 
-static char *get_modinfo(struct load_info *info, const char *tag)
+static char *get_next_modinfo(const struct load_info *info, const char *tag,
+			      char *prev)
 {
 	char *p;
 	unsigned int taglen = strlen(tag);
@@ -2492,11 +2649,23 @@ static char *get_modinfo(struct load_info *info, const char *tag)
 	 * get_modinfo() calls made before rewrite_section_headers()
 	 * must use sh_offset, as sh_addr isn't set!
 	 */
-	for (p = (char *)info->hdr + infosec->sh_offset; p; p = next_string(p, &size)) {
+	char *modinfo = (char *)info->hdr + infosec->sh_offset;
+
+	if (prev) {
+		size -= prev - modinfo;
+		modinfo = next_string(prev, &size);
+	}
+
+	for (p = modinfo; p; p = next_string(p, &size)) {
 		if (strncmp(p, tag, taglen) == 0 && p[taglen] == '=')
 			return p + taglen + 1;
 	}
 	return NULL;
+}
+
+static char *get_modinfo(const struct load_info *info, const char *tag)
+{
+	return get_next_modinfo(info, tag, NULL);
 }
 
 static void setup_modinfo(struct module *mod, struct load_info *info)
@@ -2776,8 +2945,9 @@ static inline void kmemleak_load_module(const struct module *mod,
 #ifdef CONFIG_MODULE_SIG
 static int module_sig_check(struct load_info *info, int flags)
 {
-	int err = -ENOKEY;
+	int err = -ENODATA;
 	const unsigned long markerlen = sizeof(MODULE_SIG_STRING) - 1;
+	const char *reason;
 	const void *mod = info->hdr;
 
 	/*
@@ -2792,16 +2962,38 @@ static int module_sig_check(struct load_info *info, int flags)
 		err = mod_verify_sig(mod, info);
 	}
 
-	if (!err) {
+	switch (err) {
+	case 0:
 		info->sig_ok = true;
 		return 0;
+
+		/* We don't permit modules to be loaded into trusted kernels
+		 * without a valid signature on them, but if we're not
+		 * enforcing, certain errors are non-fatal.
+		 */
+	case -ENODATA:
+		reason = "Loading of unsigned module";
+		goto decide;
+	case -ENOPKG:
+		reason = "Loading of module with unsupported crypto";
+		goto decide;
+	case -ENOKEY:
+		reason = "Loading of module with unavailable key";
+	decide:
+		if (is_module_sig_enforced()) {
+			pr_notice("%s: %s is rejected\n", info->name, reason);
+			return -EKEYREJECTED;
+		}
+
+		return security_locked_down(LOCKDOWN_MODULE_SIGNATURE);
+
+		/* All other errors are fatal, including nomem, unparseable
+		 * signatures and signature check failures - even if signatures
+		 * aren't required.
+		 */
+	default:
+		return err;
 	}
-
-	/* Not having a signature is only an error if we're strict. */
-	if (err == -ENOKEY && !is_module_sig_enforced())
-		err = 0;
-
-	return err;
 }
 #else /* !CONFIG_MODULE_SIG */
 static int module_sig_check(struct load_info *info, int flags)
@@ -2966,9 +3158,7 @@ static int setup_load_info(struct load_info *info, int flags)
 
 	/* Try to find a name early so we can log errors with a module name */
 	info->index.info = find_sec(info, ".modinfo");
-	if (!info->index.info)
-		info->name = "(missing .modinfo section)";
-	else
+	if (info->index.info)
 		info->name = get_modinfo(info, "name");
 
 	/* Find internal symbols and strings. */
@@ -2983,14 +3173,15 @@ static int setup_load_info(struct load_info *info, int flags)
 	}
 
 	if (info->index.sym == 0) {
-		pr_warn("%s: module has no symbols (stripped?)\n", info->name);
+		pr_warn("%s: module has no symbols (stripped?)\n",
+			info->name ?: "(missing .modinfo section or name field)");
 		return -ENOEXEC;
 	}
 
 	info->index.mod = find_sec(info, ".gnu.linkonce.this_module");
 	if (!info->index.mod) {
 		pr_warn("%s: No module found in object\n",
-			info->name ?: "(missing .modinfo name field)");
+			info->name ?: "(missing .modinfo section or name field)");
 		return -ENOEXEC;
 	}
 	/* This is temporary: point mod into copy of data. */
@@ -3452,14 +3643,6 @@ static void do_free_init(struct work_struct *w)
 	}
 }
 
-static int __init modules_wq_init(void)
-{
-	INIT_WORK(&init_free_wq, do_free_init);
-	init_llist_head(&init_free_list);
-	return 0;
-}
-module_init(modules_wq_init);
-
 /*
  * This is where the real work happens.
  *
@@ -3503,6 +3686,9 @@ static noinline int do_init_module(struct module *mod)
 	mod->state = MODULE_STATE_LIVE;
 	blocking_notifier_call_chain(&module_notify_list,
 				     MODULE_STATE_LIVE, mod);
+
+	/* Delay uevent until module has finished its init routine */
+	kobject_uevent(&mod->mkobj.kobj, KOBJ_ADD);
 
 	/*
 	 * We need to finish all async code before the module init sequence
@@ -4299,7 +4485,7 @@ static int modules_open(struct inode *inode, struct file *file)
 
 	if (!err) {
 		struct seq_file *m = file->private_data;
-		m->private = kallsyms_show_value() ? NULL : (void *)8ul;
+		m->private = kallsyms_show_value(file->f_cred) ? NULL : (void *)8ul;
 	}
 
 	return err;
@@ -4448,6 +4634,9 @@ void print_modules(void)
 	if (last_unloaded_module[0])
 		pr_cont(" [last unloaded: %s]", last_unloaded_module);
 	pr_cont("\n");
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	printk("Supported: %s\n", supported_printable(get_taint()));
+#endif
 }
 
 #ifdef CONFIG_MODVERSIONS

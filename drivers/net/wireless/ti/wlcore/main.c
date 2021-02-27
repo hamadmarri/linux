@@ -3658,8 +3658,10 @@ void wlcore_regdomain_config(struct wl1271 *wl)
 		goto out;
 
 	ret = pm_runtime_get_sync(wl->dev);
-	if (ret < 0)
+	if (ret < 0) {
+		pm_runtime_put_autosuspend(wl->dev);
 		goto out;
+	}
 
 	ret = wlcore_cmd_regdomain_config_locked(wl);
 	if (ret < 0) {
@@ -5749,7 +5751,8 @@ static void wlcore_roc_complete_work(struct work_struct *work)
 		ieee80211_remain_on_channel_expired(wl->hw);
 }
 
-static int wlcore_op_cancel_remain_on_channel(struct ieee80211_hw *hw)
+static int wlcore_op_cancel_remain_on_channel(struct ieee80211_hw *hw,
+					      struct ieee80211_vif *vif)
 {
 	struct wl1271 *wl = hw->priv;
 

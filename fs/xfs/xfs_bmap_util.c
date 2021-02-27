@@ -864,6 +864,7 @@ xfs_alloc_file_space(
 	xfs_filblks_t		allocatesize_fsb;
 	xfs_extlen_t		extsz, temp;
 	xfs_fileoff_t		startoffset_fsb;
+	xfs_fileoff_t		endoffset_fsb;
 	int			nimaps;
 	int			quota_flag;
 	int			rt;
@@ -891,7 +892,8 @@ xfs_alloc_file_space(
 	imapp = &imaps[0];
 	nimaps = 1;
 	startoffset_fsb	= XFS_B_TO_FSBT(mp, offset);
-	allocatesize_fsb = XFS_B_TO_FSB(mp, count);
+	endoffset_fsb = XFS_B_TO_FSB(mp, offset + count);
+	allocatesize_fsb = endoffset_fsb - startoffset_fsb;
 
 	/*
 	 * Allocate file space until done or until there is an error
@@ -1037,6 +1039,7 @@ out_trans_cancel:
 	goto out_unlock;
 }
 
+/* Caller must first wait for the completion of any pending DIOs if required. */
 int
 xfs_flush_unmap_range(
 	struct xfs_inode	*ip,
@@ -1047,9 +1050,6 @@ xfs_flush_unmap_range(
 	struct inode		*inode = VFS_I(ip);
 	xfs_off_t		rounding, start, end;
 	int			error;
-
-	/* wait for the completion of any pending DIOs */
-	inode_dio_wait(inode);
 
 	rounding = max_t(xfs_off_t, 1 << mp->m_sb.sb_blocklog, PAGE_SIZE);
 	start = round_down(offset, rounding);
@@ -1081,10 +1081,6 @@ xfs_free_file_space(
 
 	if (len <= 0)	/* if nothing being freed */
 		return 0;
-
-	error = xfs_flush_unmap_range(ip, offset, len);
-	if (error)
-		return error;
 
 	startoffset_fsb = XFS_B_TO_FSB(mp, offset);
 	endoffset_fsb = XFS_B_TO_FSBT(mp, offset + len);
@@ -1733,6 +1729,7 @@ xfs_swap_extents(
 	int			lock_flags;
 	uint64_t		f;
 	int			resblks = 0;
+	unsigned int		flags = 0;
 
 	/*
 	 * Lock the inodes against other IO, page faults and truncate to
@@ -1756,6 +1753,14 @@ xfs_swap_extents(
 		goto out_unlock;
 	}
 
+	error = xfs_qm_dqattach(ip);
+	if (error)
+		goto out_unlock;
+
+	error = xfs_qm_dqattach(tip);
+	if (error)
+		goto out_unlock;
+
 	error = xfs_swap_extent_flush(ip);
 	if (error)
 		goto out_unlock;
@@ -1766,7 +1771,7 @@ xfs_swap_extents(
 	if (xfs_inode_has_cow_data(tip)) {
 		error = xfs_reflink_cancel_cow_range(tip, 0, NULLFILEOFF, true);
 		if (error)
-			return error;
+			goto out_unlock;
 	}
 
 	/*
@@ -1788,17 +1793,16 @@ xfs_swap_extents(
 		resblks +=  XFS_SWAP_RMAP_SPACE_RES(mp, tipnext, w);
 
 		/*
-		 * Handle the corner case where either inode might straddle the
-		 * btree format boundary. If so, the inode could bounce between
-		 * btree <-> extent format on unmap -> remap cycles, freeing and
-		 * allocating a bmapbt block each time.
+		 * If either inode straddles a bmapbt block allocation boundary,
+		 * the rmapbt algorithm triggers repeated allocs and frees as
+		 * extents are remapped. This can exhaust the block reservation
+		 * prematurely and cause shutdown. Return freed blocks to the
+		 * transaction reservation to counter this behavior.
 		 */
-		if (ipnext == (XFS_IFORK_MAXEXT(ip, w) + 1))
-			resblks += XFS_IFORK_MAXEXT(ip, w);
-		if (tipnext == (XFS_IFORK_MAXEXT(tip, w) + 1))
-			resblks += XFS_IFORK_MAXEXT(tip, w);
+		flags |= XFS_TRANS_RES_FDBLKS;
 	}
-	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks, 0, 0, &tp);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_write, resblks, 0, flags,
+				&tp);
 	if (error)
 		goto out_unlock;
 

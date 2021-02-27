@@ -1244,10 +1244,7 @@ void rpc_prepare_reply_pages(struct rpc_rqst *req, struct page **pages,
 			     unsigned int base, unsigned int len,
 			     unsigned int hdrsize)
 {
-	/* Subtract one to force an extra word of buffer space for the
-	 * payload's XDR pad to fall into the rcv_buf's tail iovec.
-	 */
-	hdrsize += RPC_REPHDRSIZE + req->rq_cred->cr_auth->au_ralign - 1;
+	hdrsize += RPC_REPHDRSIZE + req->rq_cred->cr_auth->au_ralign;
 
 	xdr_inline_pages(&req->rq_rcv_buf, hdrsize << 2, pages, base, len);
 	trace_rpc_reply_pages(req);
@@ -1676,8 +1673,6 @@ call_reserveresult(struct rpc_task *task)
 			return;
 		}
 
-		printk(KERN_ERR "%s: status=%d, but no request slot, exiting\n",
-				__func__, status);
 		rpc_call_rpcerror(task, -EIO);
 		return;
 	}
@@ -1686,11 +1681,8 @@ call_reserveresult(struct rpc_task *task)
 	 * Even though there was an error, we may have acquired
 	 * a request slot somehow.  Make sure not to leak it.
 	 */
-	if (task->tk_rqstp) {
-		printk(KERN_ERR "%s: status=%d, request allocated anyway\n",
-				__func__, status);
+	if (task->tk_rqstp)
 		xprt_release(task);
-	}
 
 	switch (status) {
 	case -ENOMEM:
@@ -1699,14 +1691,9 @@ call_reserveresult(struct rpc_task *task)
 	case -EAGAIN:	/* woken up; retry */
 		task->tk_action = call_retry_reserve;
 		return;
-	case -EIO:	/* probably a shutdown */
-		break;
 	default:
-		printk(KERN_ERR "%s: unrecognized error %d, exiting\n",
-				__func__, status);
-		break;
+		rpc_call_rpcerror(task, status);
 	}
-	rpc_call_rpcerror(task, status);
 }
 
 /*
@@ -2422,6 +2409,11 @@ rpc_check_timeout(struct rpc_task *task)
 {
 	struct rpc_clnt	*clnt = task->tk_client;
 
+	if (RPC_SIGNALLED(task)) {
+		rpc_call_rpcerror(task, -ERESTARTSYS);
+		return;
+	}
+
 	if (xprt_adjust_timeout(task->tk_rqstp) == 0)
 		return;
 
@@ -2809,8 +2801,7 @@ int rpc_clnt_test_and_add_xprt(struct rpc_clnt *clnt,
 	task = rpc_call_null_helper(clnt, xprt, NULL,
 			RPC_TASK_SOFT|RPC_TASK_SOFTCONN|RPC_TASK_ASYNC|RPC_TASK_NULLCREDS,
 			&rpc_cb_add_xprt_call_ops, data);
-	if (IS_ERR(task))
-		return PTR_ERR(task);
+
 	rpc_put_task(task);
 success:
 	return 1;

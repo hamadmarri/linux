@@ -54,6 +54,10 @@
 
 #else /* !__ASSEMBLY__ */
 
+#include <linux/jump_label.h>
+
+DECLARE_STATIC_KEY_FALSE(uaccess_flush_key);
+
 #ifdef CONFIG_PPC_KUAP
 
 #include <asm/reg.h>
@@ -77,31 +81,39 @@ static inline void set_kuap(unsigned long value)
 	isync();
 }
 
-static inline void allow_user_access(void __user *to, const void __user *from,
-				     unsigned long size)
-{
-	// This is written so we can resolve to a single case at build time
-	if (__builtin_constant_p(to) && to == NULL)
-		set_kuap(AMR_KUAP_BLOCK_WRITE);
-	else if (__builtin_constant_p(from) && from == NULL)
-		set_kuap(AMR_KUAP_BLOCK_READ);
-	else
-		set_kuap(0);
-}
-
-static inline void prevent_user_access(void __user *to, const void __user *from,
-				       unsigned long size)
-{
-	set_kuap(AMR_KUAP_BLOCKED);
-}
-
-static inline bool bad_kuap_fault(struct pt_regs *regs, bool is_write)
+static inline bool
+bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
 {
 	return WARN(mmu_has_feature(MMU_FTR_RADIX_KUAP) &&
 		    (regs->kuap & (is_write ? AMR_KUAP_BLOCK_WRITE : AMR_KUAP_BLOCK_READ)),
 		    "Bug: %s fault blocked by AMR!", is_write ? "Write" : "Read");
 }
-#endif /* CONFIG_PPC_KUAP */
+#else /* CONFIG_PPC_KUAP */
+static inline void set_kuap(unsigned long value) { }
+#endif /* !CONFIG_PPC_KUAP */
+
+static __always_inline void allow_user_access(void __user *to, const void __user *from,
+					      unsigned long size, unsigned long dir)
+{
+	// This is written so we can resolve to a single case at build time
+	BUILD_BUG_ON(!__builtin_constant_p(dir));
+	if (dir == KUAP_READ)
+		set_kuap(AMR_KUAP_BLOCK_WRITE);
+	else if (dir == KUAP_WRITE)
+		set_kuap(AMR_KUAP_BLOCK_READ);
+	else if (dir == KUAP_READ_WRITE)
+		set_kuap(0);
+	else
+		BUILD_BUG();
+}
+
+static inline void prevent_user_access(void __user *to, const void __user *from,
+				       unsigned long size, unsigned long dir)
+{
+	set_kuap(AMR_KUAP_BLOCKED);
+	if (static_branch_unlikely(&uaccess_flush_key))
+		do_uaccess_flush();
+}
 
 #endif /* __ASSEMBLY__ */
 

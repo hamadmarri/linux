@@ -184,10 +184,10 @@ uint8_t amdgpu_amdkfd_get_xgmi_hops_count(struct kgd_dev *dst, struct kgd_dev *s
 		if ((mmptr) && (wptr)) {				\
 			if ((mmptr) == current->mm) {			\
 				valid = !get_user((dst), (wptr));	\
-			} else if (current->mm == NULL) {		\
-				use_mm(mmptr);				\
+			} else if (current->flags & PF_KTHREAD) {	\
+				kthread_use_mm(mmptr);			\
 				valid = !get_user((dst), (wptr));	\
-				unuse_mm(mmptr);			\
+				kthread_unuse_mm(mmptr);		\
 			}						\
 		}							\
 		valid;							\

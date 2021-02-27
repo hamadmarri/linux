@@ -396,7 +396,7 @@ xfs_attrlist_by_handle(
 	if (IS_ERR(dentry))
 		return PTR_ERR(dentry);
 
-	kbuf = kmem_zalloc_large(al_hreq.buflen, KM_SLEEP);
+	kbuf = kmem_zalloc_large(al_hreq.buflen, 0);
 	if (!kbuf)
 		goto out_dput;
 
@@ -434,7 +434,7 @@ xfs_attrmulti_attr_get(
 
 	if (*len > XFS_XATTR_SIZE_MAX)
 		return -EINVAL;
-	kbuf = kmem_zalloc_large(*len, KM_SLEEP);
+	kbuf = kmem_zalloc_large(*len, 0);
 	if (!kbuf)
 		return -ENOMEM;
 
@@ -588,13 +588,12 @@ xfs_attrmulti_by_handle(
 int
 xfs_ioc_space(
 	struct file		*filp,
-	unsigned int		cmd,
 	xfs_flock64_t		*bf)
 {
 	struct inode		*inode = file_inode(filp);
 	struct xfs_inode	*ip = XFS_I(inode);
 	struct iattr		iattr;
-	enum xfs_prealloc_flags	flags = 0;
+	enum xfs_prealloc_flags	flags = XFS_PREALLOC_CLEAR;
 	uint			iolock = XFS_IOLOCK_EXCL | XFS_MMAPLOCK_EXCL;
 	int			error;
 
@@ -620,6 +619,7 @@ xfs_ioc_space(
 	error = xfs_break_layouts(inode, &iolock, BREAK_UNMAP);
 	if (error)
 		goto out_unlock;
+	inode_dio_wait(inode);
 
 	switch (bf->l_whence) {
 	case 0: /*SEEK_SET*/
@@ -635,73 +635,21 @@ xfs_ioc_space(
 		goto out_unlock;
 	}
 
-	/*
-	 * length of <= 0 for resv/unresv/zero is invalid.  length for
-	 * alloc/free is ignored completely and we have no idea what userspace
-	 * might have set it to, so set it to zero to allow range
-	 * checks to pass.
-	 */
-	switch (cmd) {
-	case XFS_IOC_ZERO_RANGE:
-	case XFS_IOC_RESVSP:
-	case XFS_IOC_RESVSP64:
-	case XFS_IOC_UNRESVSP:
-	case XFS_IOC_UNRESVSP64:
-		if (bf->l_len <= 0) {
-			error = -EINVAL;
-			goto out_unlock;
-		}
-		break;
-	default:
-		bf->l_len = 0;
-		break;
-	}
-
-	if (bf->l_start < 0 ||
-	    bf->l_start > inode->i_sb->s_maxbytes ||
-	    bf->l_start + bf->l_len < 0 ||
-	    bf->l_start + bf->l_len >= inode->i_sb->s_maxbytes) {
+	if (bf->l_start < 0 || bf->l_start > inode->i_sb->s_maxbytes) {
 		error = -EINVAL;
 		goto out_unlock;
 	}
 
-	switch (cmd) {
-	case XFS_IOC_ZERO_RANGE:
-		flags |= XFS_PREALLOC_SET;
-		error = xfs_zero_file_space(ip, bf->l_start, bf->l_len);
-		break;
-	case XFS_IOC_RESVSP:
-	case XFS_IOC_RESVSP64:
-		flags |= XFS_PREALLOC_SET;
-		error = xfs_alloc_file_space(ip, bf->l_start, bf->l_len,
-						XFS_BMAPI_PREALLOC);
-		break;
-	case XFS_IOC_UNRESVSP:
-	case XFS_IOC_UNRESVSP64:
-		error = xfs_free_file_space(ip, bf->l_start, bf->l_len);
-		break;
-	case XFS_IOC_ALLOCSP:
-	case XFS_IOC_ALLOCSP64:
-	case XFS_IOC_FREESP:
-	case XFS_IOC_FREESP64:
-		flags |= XFS_PREALLOC_CLEAR;
-		if (bf->l_start > XFS_ISIZE(ip)) {
-			error = xfs_alloc_file_space(ip, XFS_ISIZE(ip),
-					bf->l_start - XFS_ISIZE(ip), 0);
-			if (error)
-				goto out_unlock;
-		}
-
-		iattr.ia_valid = ATTR_SIZE;
-		iattr.ia_size = bf->l_start;
-
-		error = xfs_vn_setattr_size(file_dentry(filp), &iattr);
-		break;
-	default:
-		ASSERT(0);
-		error = -EINVAL;
+	if (bf->l_start > XFS_ISIZE(ip)) {
+		error = xfs_alloc_file_space(ip, XFS_ISIZE(ip),
+				bf->l_start - XFS_ISIZE(ip), 0);
+		if (error)
+			goto out_unlock;
 	}
 
+	iattr.ia_valid = ATTR_SIZE;
+	iattr.ia_size = bf->l_start;
+	error = xfs_vn_setattr_size(file_dentry(filp), &iattr);
 	if (error)
 		goto out_unlock;
 
@@ -2119,18 +2067,13 @@ xfs_file_ioctl(
 		return xfs_ioc_setlabel(filp, mp, arg);
 	case XFS_IOC_ALLOCSP:
 	case XFS_IOC_FREESP:
-	case XFS_IOC_RESVSP:
-	case XFS_IOC_UNRESVSP:
 	case XFS_IOC_ALLOCSP64:
-	case XFS_IOC_FREESP64:
-	case XFS_IOC_RESVSP64:
-	case XFS_IOC_UNRESVSP64:
-	case XFS_IOC_ZERO_RANGE: {
+	case XFS_IOC_FREESP64: {
 		xfs_flock64_t		bf;
 
 		if (copy_from_user(&bf, arg, sizeof(bf)))
 			return -EFAULT;
-		return xfs_ioc_space(filp, cmd, &bf);
+		return xfs_ioc_space(filp, &bf);
 	}
 	case XFS_IOC_DIOINFO: {
 		struct dioattr	da;
@@ -2396,7 +2339,10 @@ xfs_file_ioctl(
 		if (error)
 			return error;
 
-		return xfs_icache_free_eofblocks(mp, &keofb);
+		sb_start_write(mp->m_super);
+		error = xfs_icache_free_eofblocks(mp, &keofb);
+		sb_end_write(mp->m_super);
+		return error;
 	}
 
 	default:

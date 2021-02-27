@@ -76,7 +76,7 @@ extern struct kmem_cache *kmem_cache;
 
 /* A table of kmalloc cache names and sizes */
 extern const struct kmalloc_info_struct {
-	const char *name;
+	const char *name[NR_KMALLOC_TYPES];
 	unsigned int size;
 } kmalloc_info[];
 
@@ -211,6 +211,34 @@ static inline int cache_vmstat_idx(struct kmem_cache *s)
 		NR_SLAB_RECLAIMABLE : NR_SLAB_UNRECLAIMABLE;
 }
 
+#ifdef CONFIG_SLUB_DEBUG
+#ifdef CONFIG_SLUB_DEBUG_ON
+DECLARE_STATIC_KEY_TRUE(slub_debug_enabled);
+#else
+DECLARE_STATIC_KEY_FALSE(slub_debug_enabled);
+#endif
+extern void print_tracking(struct kmem_cache *s, void *object);
+#else
+static inline void print_tracking(struct kmem_cache *s, void *object)
+{
+}
+#endif
+
+/*
+ * Returns true if any of the specified slub_debug flags is enabled for the
+ * cache. Use only for flags parsed by setup_slub_debug() as it also enables
+ * the static key.
+ */
+static inline bool kmem_cache_debug_flags(struct kmem_cache *s, slab_flags_t flags)
+{
+#ifdef CONFIG_SLUB_DEBUG
+	VM_WARN_ON_ONCE(!(flags & SLAB_DEBUG_FLAGS));
+	if (static_branch_unlikely(&slub_debug_enabled))
+		return s->flags & flags;
+#endif
+	return false;
+}
+
 #ifdef CONFIG_MEMCG_KMEM
 
 /* List of all root caches. */
@@ -305,7 +333,7 @@ static __always_inline int memcg_charge_slab(struct page *page,
 	if (ret)
 		goto out;
 
-	lruvec = mem_cgroup_lruvec(page_pgdat(page), memcg);
+	lruvec = mem_cgroup_lruvec(memcg, page_pgdat(page));
 	mod_lruvec_state(lruvec, cache_vmstat_idx(s), 1 << order);
 
 	/* transer try_charge() page references to kmem_cache */
@@ -329,7 +357,7 @@ static __always_inline void memcg_uncharge_slab(struct page *page, int order,
 	rcu_read_lock();
 	memcg = READ_ONCE(s->memcg_params.memcg);
 	if (likely(!mem_cgroup_is_root(memcg))) {
-		lruvec = mem_cgroup_lruvec(page_pgdat(page), memcg);
+		lruvec = mem_cgroup_lruvec(memcg, page_pgdat(page));
 		mod_lruvec_state(lruvec, cache_vmstat_idx(s), -(1 << order));
 		memcg_kmem_uncharge_memcg(page, order, memcg);
 	} else {
@@ -441,22 +469,16 @@ static inline struct kmem_cache *cache_from_obj(struct kmem_cache *s, void *x)
 {
 	struct kmem_cache *cachep;
 
-	/*
-	 * When kmemcg is not being used, both assignments should return the
-	 * same value. but we don't want to pay the assignment price in that
-	 * case. If it is not compiled in, the compiler should be smart enough
-	 * to not do even the assignment. In that case, slab_equal_or_root
-	 * will also be a constant.
-	 */
-	if (!memcg_kmem_enabled() &&
-	    !IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) &&
-	    !unlikely(s->flags & SLAB_CONSISTENCY_CHECKS))
+	if (!IS_ENABLED(CONFIG_SLAB_FREELIST_HARDENED) &&
+	    !memcg_kmem_enabled() &&
+	    !kmem_cache_debug_flags(s, SLAB_CONSISTENCY_CHECKS))
 		return s;
 
 	cachep = virt_to_cache(x);
-	WARN_ONCE(cachep && !slab_equal_or_root(cachep, s),
+	if (WARN(cachep && !slab_equal_or_root(cachep, s),
 		  "%s: Wrong slab cache. %s but object is from %s\n",
-		  __func__, s->name, cachep->name);
+		  __func__, s->name, cachep->name))
+		print_tracking(cachep, x);
 	return cachep;
 }
 

@@ -73,12 +73,16 @@
 #include "pseries.h"
 #include "../../../../drivers/pci/pci.h"
 
+DEFINE_STATIC_KEY_FALSE(shared_processor);
+EXPORT_SYMBOL_GPL(shared_processor);
+
 int CMO_PrPSP = -1;
 int CMO_SecPSP = -1;
 unsigned long CMO_PageSize = (ASM_CONST(1) << IOMMU_PAGE_SHIFT_4K);
 EXPORT_SYMBOL(CMO_PageSize);
 
 int fwnmi_active;  /* TRUE if an FWNMI handler is present */
+int ibm_nmi_interlock_token;
 
 static void pSeries_show_cpuinfo(struct seq_file *m)
 {
@@ -109,9 +113,14 @@ static void __init fwnmi_init(void)
 	struct slb_entry *slb_ptr;
 	size_t size;
 #endif
+	int ibm_nmi_register_token;
 
-	int ibm_nmi_register = rtas_token("ibm,nmi-register");
-	if (ibm_nmi_register == RTAS_UNKNOWN_SERVICE)
+	ibm_nmi_register_token = rtas_token("ibm,nmi-register");
+	if (ibm_nmi_register_token == RTAS_UNKNOWN_SERVICE)
+		return;
+
+	ibm_nmi_interlock_token = rtas_token("ibm,nmi-interlock");
+	if (WARN_ON(ibm_nmi_interlock_token == RTAS_UNKNOWN_SERVICE))
 		return;
 
 	/* If the kernel's not linked at zero we point the firmware at low
@@ -119,8 +128,8 @@ static void __init fwnmi_init(void)
 	system_reset_addr  = __pa(system_reset_fwnmi) - PHYSICAL_START;
 	machine_check_addr = __pa(machine_check_fwnmi) - PHYSICAL_START;
 
-	if (0 == rtas_call(ibm_nmi_register, 2, 1, NULL, system_reset_addr,
-				machine_check_addr))
+	if (0 == rtas_call(ibm_nmi_register_token, 2, 1, NULL,
+			   system_reset_addr, machine_check_addr))
 		fwnmi_active = 1;
 
 	/*
@@ -141,17 +150,19 @@ static void __init fwnmi_init(void)
 	}
 
 #ifdef CONFIG_PPC_BOOK3S_64
-	/* Allocate per cpu slb area to save old slb contents during MCE */
-	size = sizeof(struct slb_entry) * mmu_slb_size * nr_cpus;
-	slb_ptr = memblock_alloc_try_nid_raw(size, sizeof(struct slb_entry),
-					MEMBLOCK_LOW_LIMIT, ppc64_rma_size,
-					NUMA_NO_NODE);
-	if (!slb_ptr)
-		panic("Failed to allocate %zu bytes below %pa for slb area\n",
-		      size, &ppc64_rma_size);
+	if (!radix_enabled()) {
+		/* Allocate per cpu area to save old slb contents during MCE */
+		size = sizeof(struct slb_entry) * mmu_slb_size * nr_cpus;
+		slb_ptr = memblock_alloc_try_nid_raw(size,
+				sizeof(struct slb_entry), MEMBLOCK_LOW_LIMIT,
+				ppc64_rma_size, NUMA_NO_NODE);
+		if (!slb_ptr)
+			panic("Failed to allocate %zu bytes below %pa for slb area\n",
+			      size, &ppc64_rma_size);
 
-	for_each_possible_cpu(i)
-		paca_ptrs[i]->mce_faulty_slbs = slb_ptr + (mmu_slb_size * i);
+		for_each_possible_cpu(i)
+			paca_ptrs[i]->mce_faulty_slbs = slb_ptr + (mmu_slb_size * i);
+	}
 #endif
 }
 
@@ -553,6 +564,14 @@ void pseries_setup_rfi_flush(void)
 
 	setup_rfi_flush(types, enable);
 	setup_count_cache_flush();
+
+	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
+		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_ENTRY);
+	setup_entry_flush(enable);
+
+	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
+		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_UACCESS);
+	setup_uaccess_flush(enable);
 }
 
 #ifdef CONFIG_PCI_IOV
@@ -728,6 +747,11 @@ static void __init pSeries_setup_arch(void)
 	smp_init_pseries();
 
 
+	if (radix_enabled() && !mmu_has_feature(MMU_FTR_GTSE))
+		if (!firmware_has_feature(FW_FEATURE_RPT_INVALIDATE))
+			panic("BUG: Radix support requires either GTSE or RPT_INVALIDATE\n");
+
+
 	/* openpic global configuration register (64-bit format). */
 	/* openpic Interrupt Source Unit pointer (64-bit format). */
 	/* python0 facility area (mmio) (64-bit format) REAL address. */
@@ -739,6 +763,7 @@ static void __init pSeries_setup_arch(void)
 
 	pseries_setup_rfi_flush();
 	setup_stf_barrier();
+	pseries_lpar_read_hblkrm_characteristics();
 
 	/* By default, only probe PCI (can be overridden by rtas_pci) */
 	pci_add_flags(PCI_PROBE_ONLY);
@@ -752,6 +777,10 @@ static void __init pSeries_setup_arch(void)
 
 	if (firmware_has_feature(FW_FEATURE_LPAR)) {
 		vpa_init(boot_cpuid);
+
+		if (lppaca_shared_proc(get_lppaca()))
+			static_branch_enable(&shared_processor);
+
 		ppc_md.power_save = pseries_lpar_idle;
 		ppc_md.enable_pmcs = pseries_lpar_enable_pmcs;
 #ifdef CONFIG_PCI_IOV

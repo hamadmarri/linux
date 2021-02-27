@@ -414,6 +414,7 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 {
 	unsigned int i, idx, ofs, rest;
 	struct via82xx *chip = snd_pcm_substream_chip(substream);
+	__le32 *pgtbl;
 
 	if (dev->table.area == NULL) {
 		/* the start of each lists must be aligned to 8 bytes,
@@ -435,6 +436,7 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 	/* fill the entries */
 	idx = 0;
 	ofs = 0;
+	pgtbl = (__le32 *)dev->table.area;
 	for (i = 0; i < periods; i++) {
 		rest = fragsize;
 		/* fill descriptors for a period.
@@ -451,7 +453,7 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 				return -EINVAL;
 			}
 			addr = snd_pcm_sgbuf_get_addr(substream, ofs);
-			((u32 *)dev->table.area)[idx << 1] = cpu_to_le32(addr);
+			pgtbl[idx << 1] = cpu_to_le32(addr);
 			r = snd_pcm_sgbuf_get_chunk_size(substream, ofs, rest);
 			rest -= r;
 			if (! rest) {
@@ -466,7 +468,7 @@ static int build_via_table(struct viadev *dev, struct snd_pcm_substream *substre
 				"tbl %d: at %d  size %d (rest %d)\n",
 				idx, ofs, r, rest);
 			*/
-			((u32 *)dev->table.area)[(idx<<1) + 1] = cpu_to_le32(r | flag);
+			pgtbl[(idx<<1) + 1] = cpu_to_le32(r | flag);
 			dev->idx_table[idx].offset = ofs;
 			dev->idx_table[idx].size = r;
 			ofs += r;
@@ -542,7 +544,7 @@ static int snd_via82xx_codec_valid(struct via82xx *chip, int secondary)
 static void snd_via82xx_codec_wait(struct snd_ac97 *ac97)
 {
 	struct via82xx *chip = ac97->private_data;
-	int err;
+	__always_unused int err;
 	err = snd_via82xx_codec_ready(chip, ac97->num);
 	/* here we need to wait fairly for long time.. */
 	if (!nodelay)

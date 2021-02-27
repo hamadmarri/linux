@@ -133,6 +133,7 @@ phy_tunable_strings[__ETHTOOL_PHY_TUNABLE_COUNT][ETH_GSTRING_LEN] = {
 	[ETHTOOL_ID_UNSPEC]     = "Unspec",
 	[ETHTOOL_PHY_DOWNSHIFT]	= "phy-downshift",
 	[ETHTOOL_PHY_FAST_LINK_DOWN] = "phy-fast-link-down",
+	[ETHTOOL_PHY_EDPD]	= "phy-energy-detect-power-down",
 };
 
 static int ethtool_get_features(struct net_device *dev, void __user *useraddr)
@@ -578,6 +579,24 @@ static int load_link_ksettings_from_user(struct ethtool_link_ksettings *to,
 	return 0;
 }
 
+/* Check if the user is trying to change anything besides speed/duplex */
+bool ethtool_virtdev_validate_cmd(const struct ethtool_link_ksettings *cmd)
+{
+	struct ethtool_link_settings base2 = {};
+
+	base2.speed = cmd->base.speed;
+	base2.port = PORT_OTHER;
+	base2.duplex = cmd->base.duplex;
+	base2.cmd = cmd->base.cmd;
+	base2.link_mode_masks_nwords = cmd->base.link_mode_masks_nwords;
+
+	return !memcmp(&base2, &cmd->base, sizeof(base2)) &&
+		bitmap_empty(cmd->link_modes.supported,
+			     __ETHTOOL_LINK_MODE_MASK_NBITS) &&
+		bitmap_empty(cmd->link_modes.lp_advertising,
+			     __ETHTOOL_LINK_MODE_MASK_NBITS);
+}
+
 /* convert a kernel internal ethtool_link_ksettings to
  * ethtool_link_usettings in user space. return 0 on success, errno on
  * error.
@@ -694,6 +713,27 @@ static int ethtool_set_link_ksettings(struct net_device *dev,
 
 	return dev->ethtool_ops->set_link_ksettings(dev, &link_ksettings);
 }
+
+int ethtool_virtdev_set_link_ksettings(struct net_device *dev,
+				       const struct ethtool_link_ksettings *cmd,
+				       u32 *dev_speed, u8 *dev_duplex)
+{
+	u32 speed;
+	u8 duplex;
+
+	speed = cmd->base.speed;
+	duplex = cmd->base.duplex;
+	/* don't allow custom speed and duplex */
+	if (!ethtool_validate_speed(speed) ||
+	    !ethtool_validate_duplex(duplex) ||
+	    !ethtool_virtdev_validate_cmd(cmd))
+		return -EINVAL;
+	*dev_speed = speed;
+	*dev_duplex = duplex;
+
+	return 0;
+}
+EXPORT_SYMBOL(ethtool_virtdev_set_link_ksettings);
 
 /* Query device for its ethtool_cmd settings.
  *
@@ -1857,23 +1897,18 @@ static int ethtool_phys_id(struct net_device *dev, void __user *useraddr)
 			id.data ? (id.data * HZ) : MAX_SCHEDULE_TIMEOUT);
 	} else {
 		/* Driver expects to be called at twice the frequency in rc */
-		int n = rc * 2, i, interval = HZ / n;
+		int n = rc * 2, interval = HZ / n;
+		u64 count = n * id.data, i = 0;
 
-		/* Count down seconds */
 		do {
-			/* Count down iterations per second */
-			i = n;
-			do {
-				rtnl_lock();
-				rc = ops->set_phys_id(dev,
-				    (i & 1) ? ETHTOOL_ID_OFF : ETHTOOL_ID_ON);
-				rtnl_unlock();
-				if (rc)
-					break;
-				schedule_timeout_interruptible(interval);
-			} while (!signal_pending(current) && --i != 0);
-		} while (!signal_pending(current) &&
-			 (id.data == 0 || --id.data != 0));
+			rtnl_lock();
+			rc = ops->set_phys_id(dev,
+				    (i++ & 1) ? ETHTOOL_ID_OFF : ETHTOOL_ID_ON);
+			rtnl_unlock();
+			if (rc)
+				break;
+			schedule_timeout_interruptible(interval);
+		} while (!signal_pending(current) && (!id.data || i < count));
 	}
 
 	rtnl_lock();
@@ -2451,6 +2486,11 @@ static int ethtool_phy_tunable_valid(const struct ethtool_tunable *tuna)
 	case ETHTOOL_PHY_FAST_LINK_DOWN:
 		if (tuna->len != sizeof(u8) ||
 		    tuna->type_id != ETHTOOL_TUNABLE_U8)
+			return -EINVAL;
+		break;
+	case ETHTOOL_PHY_EDPD:
+		if (tuna->len != sizeof(u16) ||
+		    tuna->type_id != ETHTOOL_TUNABLE_U16)
 			return -EINVAL;
 		break;
 	default:

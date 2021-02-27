@@ -42,6 +42,7 @@
 #include "cifsproto.h"
 #include "cifs_unicode.h"
 #include "cifs_debug.h"
+#include "smb2proto.h"
 #include "fscache.h"
 #include "smbdirect.h"
 #ifdef CONFIG_CIFS_DFS_UPCALL
@@ -112,6 +113,8 @@ cifs_mark_open_files_invalid(struct cifs_tcon *tcon)
 
 	mutex_lock(&tcon->crfid.fid_mutex);
 	tcon->crfid.is_valid = false;
+	/* cached handle is not valid, so SMB2_CLOSE won't be sent below */
+	close_shroot_lease_locked(&tcon->crfid);
 	memset(tcon->crfid.fid, 0, sizeof(struct cifs_fid));
 	mutex_unlock(&tcon->crfid.fid_mutex);
 
@@ -120,86 +123,6 @@ cifs_mark_open_files_invalid(struct cifs_tcon *tcon)
 	 * to this tcon.
 	 */
 }
-
-#ifdef CONFIG_CIFS_DFS_UPCALL
-static int __cifs_reconnect_tcon(const struct nls_table *nlsc,
-				 struct cifs_tcon *tcon)
-{
-	int rc;
-	struct dfs_cache_tgt_list tl;
-	struct dfs_cache_tgt_iterator *it = NULL;
-	char *tree;
-	const char *tcp_host;
-	size_t tcp_host_len;
-	const char *dfs_host;
-	size_t dfs_host_len;
-
-	tree = kzalloc(MAX_TREE_SIZE, GFP_KERNEL);
-	if (!tree)
-		return -ENOMEM;
-
-	if (tcon->ipc) {
-		scnprintf(tree, MAX_TREE_SIZE, "\\\\%s\\IPC$",
-			  tcon->ses->server->hostname);
-		rc = CIFSTCon(0, tcon->ses, tree, tcon, nlsc);
-		goto out;
-	}
-
-	if (!tcon->dfs_path) {
-		rc = CIFSTCon(0, tcon->ses, tcon->treeName, tcon, nlsc);
-		goto out;
-	}
-
-	rc = dfs_cache_noreq_find(tcon->dfs_path + 1, NULL, &tl);
-	if (rc)
-		goto out;
-
-	extract_unc_hostname(tcon->ses->server->hostname, &tcp_host,
-			     &tcp_host_len);
-
-	for (it = dfs_cache_get_tgt_iterator(&tl); it;
-	     it = dfs_cache_get_next_tgt(&tl, it)) {
-		const char *tgt = dfs_cache_get_tgt_name(it);
-
-		extract_unc_hostname(tgt, &dfs_host, &dfs_host_len);
-
-		if (dfs_host_len != tcp_host_len
-		    || strncasecmp(dfs_host, tcp_host, dfs_host_len) != 0) {
-			cifs_dbg(FYI, "%s: skipping %.*s, doesn't match %.*s",
-				 __func__,
-				 (int)dfs_host_len, dfs_host,
-				 (int)tcp_host_len, tcp_host);
-			continue;
-		}
-
-		scnprintf(tree, MAX_TREE_SIZE, "\\%s", tgt);
-
-		rc = CIFSTCon(0, tcon->ses, tree, tcon, nlsc);
-		if (!rc)
-			break;
-		if (rc == -EREMOTE)
-			break;
-	}
-
-	if (!rc) {
-		if (it)
-			rc = dfs_cache_noreq_update_tgthint(tcon->dfs_path + 1,
-							    it);
-		else
-			rc = -ENOENT;
-	}
-	dfs_cache_free_tgts(&tl);
-out:
-	kfree(tree);
-	return rc;
-}
-#else
-static inline int __cifs_reconnect_tcon(const struct nls_table *nlsc,
-					struct cifs_tcon *tcon)
-{
-	return CIFSTCon(0, tcon->ses, tcon->treeName, tcon, nlsc);
-}
-#endif
 
 /* reconnect the socket, tcon, and smb session if needed */
 static int
@@ -257,7 +180,7 @@ cifs_reconnect_tcon(struct cifs_tcon *tcon, int smb_command)
 		if (server->tcpStatus != CifsNeedReconnect)
 			break;
 
-		if (--retries)
+		if (retries && --retries)
 			continue;
 
 		/*
@@ -305,7 +228,7 @@ cifs_reconnect_tcon(struct cifs_tcon *tcon, int smb_command)
 	}
 
 	cifs_mark_open_files_invalid(tcon);
-	rc = __cifs_reconnect_tcon(nls_codepage, tcon);
+	rc = cifs_tree_connect(0, tcon, nls_codepage);
 	mutex_unlock(&ses->session_mutex);
 	cifs_dbg(FYI, "reconnect tcon rc = %d\n", rc);
 
@@ -317,7 +240,7 @@ cifs_reconnect_tcon(struct cifs_tcon *tcon, int smb_command)
 	atomic_inc(&tconInfoReconnectCount);
 
 	/* tell server Unix caps we support */
-	if (ses->capabilities & CAP_UNIX)
+	if (cap_unix(ses))
 		reset_cifs_unix_caps(0, tcon, NULL, NULL);
 
 	/*
@@ -1078,7 +1001,8 @@ RmDirRetry:
 }
 
 int
-CIFSSMBMkDir(const unsigned int xid, struct cifs_tcon *tcon, const char *name,
+CIFSSMBMkDir(const unsigned int xid, struct inode *inode, umode_t mode,
+	     struct cifs_tcon *tcon, const char *name,
 	     struct cifs_sb_info *cifs_sb)
 {
 	int rc = 0;
@@ -1393,7 +1317,7 @@ int
 CIFS_open(const unsigned int xid, struct cifs_open_parms *oparms, int *oplock,
 	  FILE_ALL_INFO *buf)
 {
-	int rc = -EACCES;
+	int rc;
 	OPEN_REQ *req = NULL;
 	OPEN_RSP *rsp = NULL;
 	int bytes_returned;
@@ -1488,6 +1412,7 @@ openRetry:
 	*oplock = rsp->OplockLevel;
 	/* cifs fid stays in le */
 	oparms->fid->netfid = rsp->Fid;
+	oparms->fid->access = desired_access;
 
 	/* Let caller know file was created so we can set the mode. */
 	/* Do we care about the CreateAction in any other cases? */
@@ -1586,7 +1511,6 @@ cifs_readv_receive(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	if (server->ops->is_session_expired &&
 	    server->ops->is_session_expired(buf)) {
 		cifs_reconnect(server);
-		wake_up(&server->response_q);
 		return -1;
 	}
 
@@ -2111,7 +2035,7 @@ cifs_writev_requeue(struct cifs_writedata *wdata)
 		wdata2->tailsz = tailsz;
 		wdata2->bytes = cur_len;
 
-		rc = cifs_get_writable_file(CIFS_I(inode), false,
+		rc = cifs_get_writable_file(CIFS_I(inode), FIND_WR_ANY,
 					    &wdata2->cfile);
 		if (!wdata2->cfile) {
 			cifs_dbg(VFS, "No writable handle to retry writepages rc=%d\n",
@@ -2133,8 +2057,8 @@ cifs_writev_requeue(struct cifs_writedata *wdata)
 			}
 		}
 
+		kref_put(&wdata2->refcount, cifs_writedata_release);
 		if (rc) {
-			kref_put(&wdata2->refcount, cifs_writedata_release);
 			if (is_retryable_error(rc))
 				continue;
 			i += nr_pages;
@@ -4615,7 +4539,7 @@ findFirstRetry:
 				psrch_inf->unicode = false;
 
 			psrch_inf->ntwrk_buf_start = (char *)pSMBr;
-			psrch_inf->smallBuf = 0;
+			psrch_inf->smallBuf = false;
 			psrch_inf->srch_entries_start =
 				(char *) &pSMBr->hdr.Protocol +
 					le16_to_cpu(pSMBr->t2.DataOffset);
@@ -4749,7 +4673,7 @@ int CIFSFindNext(const unsigned int xid, struct cifs_tcon *tcon,
 				cifs_buf_release(psrch_inf->ntwrk_buf_start);
 			psrch_inf->srch_entries_start = response_data;
 			psrch_inf->ntwrk_buf_start = (char *)pSMB;
-			psrch_inf->smallBuf = 0;
+			psrch_inf->smallBuf = false;
 			if (parms->EndofSearch)
 				psrch_inf->endOfSearch = true;
 			else

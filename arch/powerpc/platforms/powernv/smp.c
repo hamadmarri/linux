@@ -143,6 +143,9 @@ static int pnv_smp_cpu_disable(void)
 		xive_smp_disable_cpu();
 	else
 		xics_migrate_irqs_away();
+
+	cleanup_cpu_mmu_context();
+
 	return 0;
 }
 
@@ -219,7 +222,7 @@ static void pnv_smp_cpu_kill_self(void)
 		 * for coming online, which are handled via
 		 * generic_check_cpu_restart() calls.
 		 */
-		kvmppc_set_host_ipi(cpu, 0);
+		kvmppc_clear_host_ipi(cpu);
 
 		srr1 = pnv_cpu_offline(cpu);
 

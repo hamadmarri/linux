@@ -27,6 +27,7 @@ void ima_free_template_entry(struct ima_template_entry *entry)
 	for (i = 0; i < entry->template_desc->num_fields; i++)
 		kfree(entry->template_data[i].data);
 
+	kfree(entry->digests);
 	kfree(entry);
 }
 
@@ -38,6 +39,7 @@ int ima_alloc_init_template(struct ima_event_data *event_data,
 			    struct ima_template_desc *desc)
 {
 	struct ima_template_desc *template_desc;
+	struct tpm_digest *digests;
 	int i, result = 0;
 
 	if (desc)
@@ -50,6 +52,15 @@ int ima_alloc_init_template(struct ima_event_data *event_data,
 	if (!*entry)
 		return -ENOMEM;
 
+	digests = kcalloc(NR_BANKS(ima_tpm_chip) + ima_extra_slots,
+			  sizeof(*digests), GFP_NOFS);
+	if (!digests) {
+		kfree(*entry);
+		*entry = NULL;
+		return -ENOMEM;
+	}
+
+	(*entry)->digests = digests;
 	(*entry)->template_desc = template_desc;
 	for (i = 0; i < template_desc->num_fields; i++) {
 		const struct ima_template_field *field =
@@ -96,26 +107,16 @@ int ima_store_template(struct ima_template_entry *entry,
 	static const char audit_cause[] = "hashing_error";
 	char *template_name = entry->template_desc->name;
 	int result;
-	struct {
-		struct ima_digest_data hdr;
-		char digest[TPM_DIGEST_SIZE];
-	} hash;
 
 	if (!violation) {
-		int num_fields = entry->template_desc->num_fields;
-
-		/* this function uses default algo */
-		hash.hdr.algo = HASH_ALGO_SHA1;
 		result = ima_calc_field_array_hash(&entry->template_data[0],
-						   entry->template_desc,
-						   num_fields, &hash.hdr);
+						   entry);
 		if (result < 0) {
 			integrity_audit_msg(AUDIT_INTEGRITY_PCR, inode,
 					    template_name, op,
 					    audit_cause, result, 0);
 			return result;
 		}
-		memcpy(entry->digest, hash.hdr.digest, hash.hdr.length);
 	}
 	entry->pcr = pcr;
 	result = ima_add_template_entry(entry, violation, op, inode, filename);
@@ -205,7 +206,7 @@ int ima_get_action(struct inode *inode, const struct cred *cred, u32 secid,
  */
 int ima_collect_measurement(struct integrity_iint_cache *iint,
 			    struct file *file, void *buf, loff_t size,
-			    enum hash_algo algo)
+			    enum hash_algo algo, struct modsig *modsig)
 {
 	const char *audit_cause = "failed";
 	struct inode *inode = file_inode(file);
@@ -218,6 +219,14 @@ int ima_collect_measurement(struct integrity_iint_cache *iint,
 		struct ima_digest_data hdr;
 		char digest[IMA_MAX_DIGEST_SIZE];
 	} hash;
+
+	/*
+	 * Always collect the modsig, because IMA might have already collected
+	 * the file digest without collecting the modsig in a previous
+	 * measurement rule.
+	 */
+	if (modsig)
+		ima_collect_modsig(modsig, buf, size);
 
 	if (iint->flags & IMA_COLLECTED)
 		goto out;
@@ -285,7 +294,7 @@ out:
 void ima_store_measurement(struct integrity_iint_cache *iint,
 			   struct file *file, const unsigned char *filename,
 			   struct evm_ima_xattr_data *xattr_value,
-			   int xattr_len, int pcr,
+			   int xattr_len, const struct modsig *modsig, int pcr,
 			   struct ima_template_desc *template_desc)
 {
 	static const char op[] = "add_template_measure";
@@ -297,10 +306,17 @@ void ima_store_measurement(struct integrity_iint_cache *iint,
 					     .file = file,
 					     .filename = filename,
 					     .xattr_value = xattr_value,
-					     .xattr_len = xattr_len };
+					     .xattr_len = xattr_len,
+					     .modsig = modsig };
 	int violation = 0;
 
-	if (iint->measured_pcrs & (0x1 << pcr))
+	/*
+	 * We still need to store the measurement in the case of MODSIG because
+	 * we only have its contents to put in the list at the time of
+	 * appraisal, but a file measurement from earlier might already exist in
+	 * the measurement list.
+	 */
+	if (iint->measured_pcrs & (0x1 << pcr) && !modsig)
 		return;
 
 	result = ima_alloc_init_template(&event_data, &entry, template_desc);

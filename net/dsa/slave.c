@@ -90,11 +90,9 @@ static int dsa_slave_open(struct net_device *dev)
 			goto clear_allmulti;
 	}
 
-	err = dsa_port_enable(dp, dev->phydev);
+	err = dsa_port_enable_rt(dp, dev->phydev);
 	if (err)
 		goto clear_promisc;
-
-	phylink_start(dp->pl);
 
 	return 0;
 
@@ -119,9 +117,7 @@ static int dsa_slave_close(struct net_device *dev)
 	cancel_work_sync(&dp->xmit_work);
 	skb_queue_purge(&dp->xmit_queue);
 
-	phylink_stop(dp->pl);
-
-	dsa_port_disable(dp);
+	dsa_port_disable_rt(dp);
 
 	dev_mc_unsync(master, dev);
 	dev_uc_unsync(master, dev);
@@ -1280,15 +1276,6 @@ static int dsa_slave_phy_setup(struct net_device *slave_dev)
 	return ret;
 }
 
-static struct lock_class_key dsa_slave_netdev_xmit_lock_key;
-static void dsa_slave_set_lockdep_class_one(struct net_device *dev,
-					    struct netdev_queue *txq,
-					    void *_unused)
-{
-	lockdep_set_class(&txq->_xmit_lock,
-			  &dsa_slave_netdev_xmit_lock_key);
-}
-
 int dsa_slave_suspend(struct net_device *slave_dev)
 {
 	struct dsa_port *dp = dsa_slave_to_port(slave_dev);
@@ -1360,6 +1347,7 @@ int dsa_slave_create(struct dsa_port *port)
 	slave_dev->features = master->vlan_features | NETIF_F_HW_TC |
 				NETIF_F_HW_VLAN_CTAG_FILTER;
 	slave_dev->hw_features |= NETIF_F_HW_TC;
+	slave_dev->features |= NETIF_F_LLTX;
 	slave_dev->ethtool_ops = &dsa_slave_ethtool_ops;
 	if (!IS_ERR_OR_NULL(port->mac))
 		ether_addr_copy(slave_dev->dev_addr, port->mac);
@@ -1370,9 +1358,6 @@ int dsa_slave_create(struct dsa_port *port)
 	slave_dev->min_mtu = 0;
 	slave_dev->max_mtu = ETH_MAX_MTU;
 	SET_NETDEV_DEVTYPE(slave_dev, &dsa_type);
-
-	netdev_for_each_tx_queue(slave_dev, dsa_slave_set_lockdep_class_one,
-				 NULL);
 
 	SET_NETDEV_DEV(slave_dev, port->ds->dev);
 	slave_dev->dev.of_node = port->dn;

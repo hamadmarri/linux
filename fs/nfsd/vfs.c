@@ -812,7 +812,7 @@ struct raparms *
 nfsd_init_raparms(struct file *file)
 {
 	struct inode *inode = file_inode(file);
-	dev_t dev = inode->i_sb->s_dev;
+	dev_t dev = inode_get_dev(inode);
 	ino_t ino = inode->i_ino;
 	struct raparms	*ra, **rap, **frap = NULL;
 	int depth = 0;
@@ -975,7 +975,7 @@ static int wait_for_concurrent_writes(struct file *file)
 	int err = 0;
 
 	if (atomic_read(&inode->i_writecount) > 1
-	    || (last_ino == inode->i_ino && last_dev == inode->i_sb->s_dev)) {
+	    || (last_ino == inode->i_ino && last_dev == inode_get_dev(inode))) {
 		dprintk("nfsd: write defer %d\n", task_pid_nr(current));
 		msleep(10);
 		dprintk("nfsd: write resume %d\n", task_pid_nr(current));
@@ -986,7 +986,7 @@ static int wait_for_concurrent_writes(struct file *file)
 		err = vfs_fsync(file, 0);
 	}
 	last_ino = inode->i_ino;
-	last_dev = inode->i_sb->s_dev;
+	last_dev = inode_get_dev(inode);
 	return err;
 }
 
@@ -1008,12 +1008,13 @@ nfsd_vfs_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
 
 	if (test_bit(RQ_LOCAL, &rqstp->rq_flags))
 		/*
-		 * We want less throttling in balance_dirty_pages()
-		 * and shrink_inactive_list() so that nfs to
+		 * We want throttling in balance_dirty_pages()
+		 * and shrink_inactive_list() to only consider
+		 * the backingdev we are writing to, so that nfs to
 		 * localhost doesn't cause nfsd to lock up due to all
 		 * the client's dirty pages or its congested queue.
 		 */
-		current->flags |= PF_LESS_THROTTLE;
+		current->flags |= PF_LOCAL_THROTTLE;
 
 	exp = fhp->fh_export;
 	use_wgather = (rqstp->rq_vers == 2) && EX_WGATHER(exp);
@@ -1028,6 +1029,7 @@ nfsd_vfs_write(struct svc_rqst *rqstp, struct svc_fh *fhp, struct file *file,
 	host_err = vfs_iter_write(file, &iter, &pos, flags);
 	if (host_err < 0)
 		goto out_nfserr;
+	*cnt = host_err;
 	nfsdstats.io_write += *cnt;
 	fsnotify_modify(file);
 
@@ -1043,7 +1045,7 @@ out_nfserr:
 		nfserr = nfserrno(host_err);
 	}
 	if (test_bit(RQ_LOCAL, &rqstp->rq_flags))
-		current_restore_flags(pflags, PF_LESS_THROTTLE);
+		current_restore_flags(pflags, PF_LOCAL_THROTTLE);
 	return nfserr;
 }
 
@@ -1216,6 +1218,9 @@ nfsd_create_locked(struct svc_rqst *rqstp, struct svc_fh *fhp,
 	if (!(iap->ia_valid & ATTR_MODE))
 		iap->ia_mode = 0;
 	iap->ia_mode = (iap->ia_mode & S_IALLUGO) | type;
+
+	if (!IS_POSIXACL(dirp))
+		iap->ia_mode &= ~current_umask();
 
 	err = 0;
 	host_err = 0;
@@ -1448,6 +1453,9 @@ do_nfsd_create(struct svc_rqst *rqstp, struct svc_fh *fhp,
 		fh_drop_write(fhp);
 		goto out;
 	}
+
+	if (!IS_POSIXACL(dirp))
+		iap->ia_mode &= ~current_umask();
 
 	host_err = vfs_create(dirp, dchild, iap->ia_mode, true);
 	if (host_err < 0) {

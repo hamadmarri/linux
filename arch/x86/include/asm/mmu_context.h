@@ -28,16 +28,16 @@ static inline void paravirt_activate_mm(struct mm_struct *prev,
 
 DECLARE_STATIC_KEY_FALSE(rdpmc_always_available_key);
 
-static inline void load_mm_cr4(struct mm_struct *mm)
+static inline void load_mm_cr4_irqsoff(struct mm_struct *mm)
 {
 	if (static_branch_unlikely(&rdpmc_always_available_key) ||
 	    atomic_read(&mm->context.perf_rdpmc_allowed))
-		cr4_set_bits(X86_CR4_PCE);
+		cr4_set_bits_irqsoff(X86_CR4_PCE);
 	else
-		cr4_clear_bits(X86_CR4_PCE);
+		cr4_clear_bits_irqsoff(X86_CR4_PCE);
 }
 #else
-static inline void load_mm_cr4(struct mm_struct *mm) {}
+static inline void load_mm_cr4_irqsoff(struct mm_struct *mm) {}
 #endif
 
 #ifdef CONFIG_MODIFY_LDT_SYSCALL
@@ -379,6 +379,15 @@ static inline temp_mm_state_t use_temporary_mm(struct mm_struct *mm)
 	temp_mm_state_t temp_state;
 
 	lockdep_assert_irqs_disabled();
+
+	/*
+	 * Make sure not to be in TLB lazy mode, as otherwise we'll end up
+	 * with a stale address space WITHOUT being in lazy mode after
+	 * restoring the previous mm.
+	 */
+	if (this_cpu_read(cpu_tlbstate.is_lazy))
+		leave_mm(smp_processor_id());
+
 	temp_state.mm = this_cpu_read(cpu_tlbstate.loaded_mm);
 	switch_mm_irqs_off(NULL, mm, current);
 

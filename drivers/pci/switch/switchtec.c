@@ -175,7 +175,7 @@ static int mrpc_queue_cmd(struct switchtec_user *stuser)
 	kref_get(&stuser->kref);
 	stuser->read_len = sizeof(stuser->data);
 	stuser_set_state(stuser, MRPC_QUEUED);
-	init_completion(&stuser->comp);
+	reinit_completion(&stuser->comp);
 	list_add_tail(&stuser->list, &stdev->mrpc_queue);
 
 	mrpc_cmd_submit(stdev);
@@ -675,7 +675,7 @@ static int ioctl_event_summary(struct switchtec_dev *stdev,
 		return -ENOMEM;
 
 	s->global = ioread32(&stdev->mmio_sw_event->global_summary);
-	s->part_bitmap = ioread32(&stdev->mmio_sw_event->part_event_bitmap);
+	s->part_bitmap = ioread64(&stdev->mmio_sw_event->part_event_bitmap);
 	s->local_part = ioread32(&stdev->mmio_part_cfg->part_event_summary);
 
 	for (i = 0; i < stdev->partition_count; i++) {
@@ -771,7 +771,7 @@ static u32 __iomem *event_hdr_addr(struct switchtec_dev *stdev,
 	size_t off;
 
 	if (event_id < 0 || event_id >= SWITCHTEC_IOCTL_MAX_EVENTS)
-		return ERR_PTR(-EINVAL);
+		return (u32 __iomem *)ERR_PTR(-EINVAL);
 
 	off = event_regs[event_id].offset;
 
@@ -779,10 +779,10 @@ static u32 __iomem *event_hdr_addr(struct switchtec_dev *stdev,
 		if (index == SWITCHTEC_IOCTL_EVENT_LOCAL_PART_IDX)
 			index = stdev->partition;
 		else if (index < 0 || index >= stdev->partition_count)
-			return ERR_PTR(-EINVAL);
+			return (u32 __iomem *)ERR_PTR(-EINVAL);
 	} else if (event_regs[event_id].map_reg == pff_ev_reg) {
 		if (index < 0 || index >= stdev->pff_csr_count)
-			return ERR_PTR(-EINVAL);
+			return (u32 __iomem *)ERR_PTR(-EINVAL);
 	}
 
 	return event_regs[event_id].map_reg(stdev, off, index);
@@ -888,11 +888,11 @@ static int ioctl_event_ctl(struct switchtec_dev *stdev,
 }
 
 static int ioctl_pff_to_port(struct switchtec_dev *stdev,
-			     struct switchtec_ioctl_pff_port *up)
+			     struct switchtec_ioctl_pff_port __user *up)
 {
 	int i, part;
 	u32 reg;
-	struct part_cfg_regs *pcfg;
+	struct part_cfg_regs __iomem *pcfg;
 	struct switchtec_ioctl_pff_port p;
 
 	if (copy_from_user(&p, up, sizeof(p)))
@@ -935,10 +935,10 @@ static int ioctl_pff_to_port(struct switchtec_dev *stdev,
 }
 
 static int ioctl_port_to_pff(struct switchtec_dev *stdev,
-			     struct switchtec_ioctl_pff_port *up)
+			     struct switchtec_ioctl_pff_port __user *up)
 {
 	struct switchtec_ioctl_pff_port p;
-	struct part_cfg_regs *pcfg;
+	struct part_cfg_regs __iomem *pcfg;
 
 	if (copy_from_user(&p, up, sizeof(p)))
 		return -EFAULT;
@@ -1276,7 +1276,7 @@ static int switchtec_init_isr(struct switchtec_dev *stdev)
 	if (nvecs < 0)
 		return nvecs;
 
-	event_irq = ioread32(&stdev->mmio_part_cfg->vep_vector_number);
+	event_irq = ioread16(&stdev->mmio_part_cfg->vep_vector_number);
 	if (event_irq < 0 || event_irq >= nvecs)
 		return -EFAULT;
 
@@ -1313,7 +1313,7 @@ static void init_pff(struct switchtec_dev *stdev)
 {
 	int i;
 	u32 reg;
-	struct part_cfg_regs *pcfg = stdev->mmio_part_cfg;
+	struct part_cfg_regs __iomem *pcfg = stdev->mmio_part_cfg;
 
 	for (i = 0; i < SWITCHTEC_MAX_PFF_CSR; i++) {
 		reg = ioread16(&stdev->mmio_pff_csr[i].vendor_id);
@@ -1349,7 +1349,7 @@ static int switchtec_init_pci(struct switchtec_dev *stdev,
 	if (rc)
 		return rc;
 
-	rc = dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(64));
+	rc = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
 	if (rc)
 		return rc;
 

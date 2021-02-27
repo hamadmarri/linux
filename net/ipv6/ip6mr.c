@@ -265,9 +265,10 @@ static void __net_exit ip6mr_rules_exit(struct net *net)
 	rtnl_unlock();
 }
 
-static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb)
+static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb,
+			    struct netlink_ext_ack *extack)
 {
-	return fib_rules_dump(net, nb, RTNL_FAMILY_IP6MR);
+	return fib_rules_dump(net, nb, RTNL_FAMILY_IP6MR, extack);
 }
 
 static unsigned int ip6mr_rules_seq_read(struct net *net)
@@ -324,7 +325,8 @@ static void __net_exit ip6mr_rules_exit(struct net *net)
 	rtnl_unlock();
 }
 
-static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb)
+static int ip6mr_rules_dump(struct net *net, struct notifier_block *nb,
+			    struct netlink_ext_ack *extack)
 {
 	return 0;
 }
@@ -1256,10 +1258,11 @@ static unsigned int ip6mr_seq_read(struct net *net)
 	return net->ipv6.ipmr_seq + ip6mr_rules_seq_read(net);
 }
 
-static int ip6mr_dump(struct net *net, struct notifier_block *nb)
+static int ip6mr_dump(struct net *net, struct notifier_block *nb,
+		      struct netlink_ext_ack *extack)
 {
 	return mr_dump(net, nb, RTNL_FAMILY_IP6MR, ip6mr_rules_dump,
-		       ip6mr_mr_table_iter, &mrt_lock);
+		       ip6mr_mr_table_iter, &mrt_lock, extack);
 }
 
 static struct notifier_block ip6_mr_notifier = {
@@ -2498,7 +2501,7 @@ static int ip6mr_rtm_dumproute(struct sk_buff *skb, struct netlink_callback *cb)
 
 		mrt = ip6mr_get_table(sock_net(skb->sk), filter.table_id);
 		if (!mrt) {
-			if (filter.dump_all_families)
+			if (rtnl_msg_family(cb->nlh) != RTNL_FAMILY_IP6MR)
 				return skb->len;
 
 			NL_SET_ERR_MSG_MOD(cb->extack, "MR table does not exist");

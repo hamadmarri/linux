@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2019 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2020 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -130,6 +130,9 @@ struct lpfc_iocbq {
 #define IOCB_BUSY           1
 #define IOCB_ERROR          2
 #define IOCB_TIMEDOUT       3
+#define IOCB_ABORTED        4
+#define IOCB_ABORTING	    5
+#define IOCB_NORESOURCE	    6
 
 #define SLI_WQE_RET_WQE    1    /* Return WQE if cmd ring full */
 
@@ -138,6 +141,8 @@ struct lpfc_iocbq {
 #define WQE_ERROR          2
 #define WQE_TIMEDOUT       3
 #define WQE_ABORTED        4
+#define WQE_ABORTING	   5
+#define WQE_NORESOURCE	   6
 
 #define LPFC_MBX_WAKE		1
 #define LPFC_MBX_IMED_UNREG	2
@@ -365,9 +370,18 @@ struct lpfc_io_buf {
 	/* Common fields */
 	struct list_head list;
 	void *data;
+
 	dma_addr_t dma_handle;
 	dma_addr_t dma_phys_sgl;
-	struct sli4_sge *dma_sgl;
+
+	struct sli4_sge *dma_sgl; /* initial segment chunk */
+
+	/* linked list of extra sli4_hybrid_sge */
+	struct list_head dma_sgl_xtra_list;
+
+	/* list head for fcp_cmd_rsp buf */
+	struct list_head dma_cmd_rsp_list;
+
 	struct lpfc_iocbq cur_iocbq;
 	struct lpfc_sli4_hdw_queue *hdwq;
 	uint16_t hdwq_no;
@@ -437,6 +451,6 @@ struct lpfc_io_buf {
 	uint64_t ts_last_cmd;
 	uint64_t ts_cmd_wqput;
 	uint64_t ts_isr_cmpl;
-	uint64_t ts_data_nvme;
+	uint64_t ts_data_io;
 #endif
 };

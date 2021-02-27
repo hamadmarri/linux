@@ -1,7 +1,7 @@
 /*******************************************************************
  * This file is part of the Emulex Linux Device Driver for         *
  * Fibre Channel Host Bus Adapters.                                *
- * Copyright (C) 2017-2018 Broadcom. All Rights Reserved. The term *
+ * Copyright (C) 2017-2020 Broadcom. All Rights Reserved. The term *
  * “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.     *
  * Copyright (C) 2004-2016 Emulex.  All rights reserved.           *
  * EMULEX and SLI are trademarks of Emulex.                        *
@@ -22,7 +22,7 @@
 
 #define FDMI_DID        0xfffffaU
 #define NameServer_DID  0xfffffcU
-#define SCR_DID         0xfffffdU
+#define Fabric_Cntl_DID 0xfffffdU
 #define Fabric_DID      0xfffffeU
 #define Bcast_DID       0xffffffU
 #define Mask_DID        0xffffffU
@@ -588,6 +588,7 @@ struct fc_vft_header {
 #define ELS_CMD_RRQ       0x12000000
 #define ELS_CMD_REC       0x13000000
 #define ELS_CMD_RDP       0x18000000
+#define ELS_CMD_RDF       0x19000000
 #define ELS_CMD_PRLI      0x20100014
 #define ELS_CMD_NVMEPRLI  0x20140018
 #define ELS_CMD_PRLO      0x21100014
@@ -597,7 +598,6 @@ struct fc_vft_header {
 #define ELS_CMD_ADISC     0x52000000
 #define ELS_CMD_FARP      0x54000000
 #define ELS_CMD_FARPR     0x55000000
-#define ELS_CMD_RPS       0x56000000
 #define ELS_CMD_RPL       0x57000000
 #define ELS_CMD_FAN       0x60000000
 #define ELS_CMD_RSCN      0x61040000
@@ -630,6 +630,7 @@ struct fc_vft_header {
 #define ELS_CMD_RRQ       0x12
 #define ELS_CMD_REC       0x13
 #define ELS_CMD_RDP	  0x18
+#define ELS_CMD_RDF	  0x19
 #define ELS_CMD_PRLI      0x14001020
 #define ELS_CMD_NVMEPRLI  0x18001420
 #define ELS_CMD_PRLO      0x14001021
@@ -639,7 +640,6 @@ struct fc_vft_header {
 #define ELS_CMD_ADISC     0x52
 #define ELS_CMD_FARP      0x54
 #define ELS_CMD_FARPR     0x55
-#define ELS_CMD_RPS       0x56
 #define ELS_CMD_RPL       0x57
 #define ELS_CMD_FAN       0x60
 #define ELS_CMD_RSCN      0x0461
@@ -843,7 +843,7 @@ typedef struct _ADISC {		/* Structure is in Big Endian format */
 	struct lpfc_name portName;
 	struct lpfc_name nodeName;
 	uint32_t DID;
-} ADISC;
+} __packed ADISC;
 
 typedef struct _FARP {		/* Structure is in Big Endian format */
 	uint32_t Mflags:8;
@@ -873,7 +873,7 @@ typedef struct _FAN {		/* Structure is in Big Endian format */
 	uint32_t Fdid;
 	struct lpfc_name FportName;
 	struct lpfc_name FnodeName;
-} FAN;
+} __packed FAN;
 
 typedef struct _SCR {		/* Structure is in Big Endian format */
 	uint8_t resvd1;
@@ -917,25 +917,7 @@ typedef struct _RNID {		/* Structure is in Big Endian format */
 	union {
 		RNID_TOP_DISC topologyDisc;	/* topology disc (0xdf) */
 	} un;
-} RNID;
-
-typedef struct  _RPS {		/* Structure is in Big Endian format */
-	union {
-		uint32_t portNum;
-		struct lpfc_name portName;
-	} un;
-} RPS;
-
-typedef struct  _RPS_RSP {	/* Structure is in Big Endian format */
-	uint16_t rsvd1;
-	uint16_t portStatus;
-	uint32_t linkFailureCnt;
-	uint32_t lossSyncCnt;
-	uint32_t lossSignalCnt;
-	uint32_t primSeqErrCnt;
-	uint32_t invalidXmitWord;
-	uint32_t crcCnt;
-} RPS_RSP;
+} __packed RNID;
 
 struct RLS {			/* Structure is in Big Endian format */
 	uint32_t rls;
@@ -1340,24 +1322,7 @@ struct fc_rdp_res_frame {
 /* lpfc_sli_ct_request defines the CT_IU preamble for FDMI commands */
 #define  SLI_CT_FDMI_Subtypes     0x10	/* Management Service Subtype */
 
-/*
- * Registered Port List Format
- */
-struct lpfc_fdmi_reg_port_list {
-	uint32_t EntryCnt;
-	uint32_t pe;		/* Variable-length array */
-};
-
-
 /* Definitions for HBA / Port attribute entries */
-
-struct lpfc_fdmi_attr_def { /* Defined in TLV format */
-	/* Structure is in Big Endian format */
-	uint32_t AttrType:16;
-	uint32_t AttrLen:16;
-	uint32_t AttrValue;  /* Marks start of Value (ATTRIBUTE_ENTRY) */
-};
-
 
 /* Attribute Entry */
 struct lpfc_fdmi_attr_entry {
@@ -1369,7 +1334,13 @@ struct lpfc_fdmi_attr_entry {
 	} un;
 };
 
-#define LPFC_FDMI_MAX_AE_SIZE	sizeof(struct lpfc_fdmi_attr_entry)
+struct lpfc_fdmi_attr_def { /* Defined in TLV format */
+	/* Structure is in Big Endian format */
+	uint32_t AttrType:16;
+	uint32_t AttrLen:16;
+	/* Marks start of Value (ATTRIBUTE_ENTRY) */
+	struct lpfc_fdmi_attr_entry AttrValue;
+} __packed;
 
 /*
  * HBA Attribute Block
@@ -1394,13 +1365,23 @@ struct lpfc_fdmi_hba_ident {
 };
 
 /*
+ * Registered Port List Format
+ */
+struct lpfc_fdmi_reg_port_list {
+	uint32_t EntryCnt;
+	struct lpfc_fdmi_port_entry pe;
+} __packed;
+
+/*
  * Register HBA(RHBA)
  */
 struct lpfc_fdmi_reg_hba {
 	struct lpfc_fdmi_hba_ident hi;
-	struct lpfc_fdmi_reg_port_list rpl;	/* variable-length array */
-/* struct lpfc_fdmi_attr_block   ab; */
+	struct lpfc_fdmi_reg_port_list rpl;
 };
+
+/******** MI MIB ********/
+#define SLI_CT_MIB_Subtypes	0x11
 
 /*
  * Register HBA Attributes (RHAT)
@@ -1487,7 +1468,7 @@ struct lpfc_fdmi_reg_portattr {
 #define LPFC_FDMI2_HBA_ATTR			0x0002efff
 
 /*
- * Port Attrubute Types
+ * Port Attribute Types
  */
 #define  RPRT_SUPPORTED_FC4_TYPES     0x1 /* 32 byte binary array */
 #define  RPRT_SUPPORTED_SPEED         0x2 /* 32-bit unsigned int */
@@ -1505,6 +1486,7 @@ struct lpfc_fdmi_reg_portattr {
 #define  RPRT_PORT_STATE              0x101 /* 32-bit unsigned int */
 #define  RPRT_DISC_PORT               0x102 /* 32-bit unsigned int */
 #define  RPRT_PORT_ID                 0x103 /* 32-bit unsigned int */
+#define  RPRT_VENDOR_MI               0xf047 /* vendor ascii string */
 #define  RPRT_SMART_SERVICE           0xf100 /* 4 to 256 byte ASCII string */
 #define  RPRT_SMART_GUID              0xf101 /* 8 byte WWNN + 8 byte WWPN */
 #define  RPRT_SMART_VERSION           0xf102 /* 4 to 256 byte ASCII string */
@@ -1537,6 +1519,7 @@ struct lpfc_fdmi_reg_portattr {
 #define LPFC_FDMI_SMART_ATTR_port_info		0x00100000 /* Vendor specific */
 #define LPFC_FDMI_SMART_ATTR_qos		0x00200000 /* Vendor specific */
 #define LPFC_FDMI_SMART_ATTR_security		0x00400000 /* Vendor specific */
+#define LPFC_FDMI_VENDOR_ATTR_mi		0x00800000 /* Vendor specific */
 
 /* Bit mask for FDMI-1 defined PORT attributes */
 #define LPFC_FDMI1_PORT_ATTR			0x0000003f
@@ -3284,8 +3267,7 @@ typedef struct {
 #endif
 
 #ifdef __BIG_ENDIAN_BITFIELD
-	uint32_t rsvd1     : 19;  /* Reserved                             */
-	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
+	uint32_t rsvd1     : 20;  /* Reserved                             */
 	uint32_t casabt    :  1;  /* Configure async abts status notice   */
 	uint32_t rsvd2     :  2;  /* Reserved                             */
 	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
@@ -3309,12 +3291,10 @@ typedef struct {
 	uint32_t cbg       :  1;  /* Configure BlockGuard                 */
 	uint32_t rsvd2     :  2;  /* Reserved                             */
 	uint32_t casabt    :  1;  /* Configure async abts status notice   */
-	uint32_t cdss      :  1;  /* Configure Data Security SLI          */
-	uint32_t rsvd1     : 19;  /* Reserved                             */
+	uint32_t rsvd1     : 20;  /* Reserved                             */
 #endif
 #ifdef __BIG_ENDIAN_BITFIELD
-	uint32_t rsvd3     : 19;  /* Reserved                             */
-	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
+	uint32_t rsvd3     : 20;  /* Reserved                             */
 	uint32_t gasabt    :  1;  /* Grant async abts status notice       */
 	uint32_t rsvd4     :  2;  /* Reserved                             */
 	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
@@ -3338,8 +3318,7 @@ typedef struct {
 	uint32_t gbg       :  1;  /* Grant BlockGuard                     */
 	uint32_t rsvd4     :  2;  /* Reserved                             */
 	uint32_t gasabt    :  1;  /* Grant async abts status notice       */
-	uint32_t gdss      :  1;  /* Configure Data Security SLI          */
-	uint32_t rsvd3     : 19;  /* Reserved                             */
+	uint32_t rsvd3     : 20;  /* Reserved                             */
 #endif
 
 #ifdef __BIG_ENDIAN_BITFIELD
@@ -3361,15 +3340,11 @@ typedef struct {
 	uint32_t rsvd6;           /* Reserved                             */
 
 #ifdef __BIG_ENDIAN_BITFIELD
-	uint32_t fips_rev   : 3;   /* FIPS Spec Revision                   */
-	uint32_t fips_level : 4;   /* FIPS Level                           */
-	uint32_t sec_err    : 9;   /* security crypto error                */
+	uint32_t rsvd7      : 16;
 	uint32_t max_vpi    : 16;  /* Max number of virt N-Ports           */
 #else	/*  __LITTLE_ENDIAN */
 	uint32_t max_vpi    : 16;  /* Max number of virt N-Ports           */
-	uint32_t sec_err    : 9;   /* security crypto error                */
-	uint32_t fips_level : 4;   /* FIPS Level                           */
-	uint32_t fips_rev   : 3;   /* FIPS Spec Revision                   */
+	uint32_t rsvd7      : 16;
 #endif
 
 } CONFIG_PORT_VAR;

@@ -212,7 +212,7 @@ static const struct ib_device_ops qedr_dev_ops = {
 	.get_link_layer = qedr_link_layer,
 	.map_mr_sg = qedr_map_mr_sg,
 	.mmap = qedr_mmap,
-	.modify_port = qedr_modify_port,
+	.mmap_free = qedr_mmap_free,
 	.modify_qp = qedr_modify_qp,
 	.modify_srq = qedr_modify_srq,
 	.poll_cq = qedr_poll_cq,
@@ -357,9 +357,10 @@ static int qedr_alloc_resources(struct qedr_dev *dev)
 		return -ENOMEM;
 
 	spin_lock_init(&dev->sgid_lock);
+	xa_init_flags(&dev->srqs, XA_FLAGS_LOCK_IRQ);
 
 	if (IS_IWARP(dev)) {
-		xa_init_flags(&dev->qps, XA_FLAGS_LOCK_IRQ);
+		xa_init(&dev->qps);
 		dev->iwarp_wq = create_singlethread_workqueue("qedr_iwarpq");
 	}
 
@@ -600,7 +601,7 @@ static int qedr_set_device_attr(struct qedr_dev *dev)
 	qed_attr = dev->ops->rdma_query_device(dev->rdma_ctx);
 
 	/* Part 2 - check capabilities */
-	page_size = ~dev->attr.page_size_caps + 1;
+	page_size = ~qed_attr->page_size_caps + 1;
 	if (page_size > PAGE_SIZE) {
 		DP_ERR(dev,
 		       "Kernel PAGE_SIZE is %ld which is smaller than minimum page size (%d) required by qedr\n",
@@ -826,7 +827,7 @@ static int qedr_init_hw(struct qedr_dev *dev)
 	if (rc)
 		goto out;
 
-	dev->db_addr = (void __iomem *)(uintptr_t)out_params.dpi_addr;
+	dev->db_addr = out_params.dpi_addr;
 	dev->db_phys_addr = out_params.dpi_phys_addr;
 	dev->db_size = out_params.dpi_size;
 	dev->dpi = out_params.dpi;
@@ -1024,6 +1025,13 @@ static void qedr_notify(struct qedr_dev *dev, enum qede_rdma_event event)
 		break;
 	case QEDE_CHANGE_ADDR:
 		qedr_mac_address_change(dev);
+		break;
+	case QEDE_CHANGE_MTU:
+		if (rdma_protocol_iwarp(&dev->ibdev, 1))
+			if (dev->ndev->mtu != dev->iwarp_max_mtu)
+				DP_NOTICE(dev,
+					  "Mtu was changed from %d to %d. This will not take affect for iWARP until qedr is reloaded\n",
+					  dev->iwarp_max_mtu, dev->ndev->mtu);
 		break;
 	default:
 		pr_err("Event not supported\n");

@@ -123,6 +123,13 @@ struct attribute_group {
 	.show	= _name##_show,						\
 }
 
+#define __ATTR_RW_MODE(_name, _mode) {					\
+	.attr	= { .name = __stringify(_name),				\
+		    .mode = VERIFY_OCTAL_PERMISSIONS(_mode) },		\
+	.show	= _name##_show,						\
+	.store	= _name##_store,					\
+}
+
 #define __ATTR_WO(_name) {						\
 	.attr	= { .name = __stringify(_name), .mode = 0200 },		\
 	.store	= _name##_store,					\
@@ -291,6 +298,10 @@ void sysfs_remove_link_from_group(struct kobject *kobj, const char *group_name,
 int __compat_only_sysfs_link_entry_to_kobj(struct kobject *kobj,
 				      struct kobject *target_kobj,
 				      const char *target_name);
+int compat_only_sysfs_link_entry_to_kobj(struct kobject *kobj,
+					 struct kobject *target_kobj,
+					 const char *target_name,
+					 const char *symlink_name);
 
 void sysfs_notify(struct kobject *kobj, const char *dir, const char *attr);
 
@@ -495,6 +506,14 @@ static inline int __compat_only_sysfs_link_entry_to_kobj(
 	struct kobject *kobj,
 	struct kobject *target_kobj,
 	const char *target_name)
+{
+	return 0;
+}
+
+static inline int compat_only_sysfs_link_entry_to_kobj(struct kobject *kobj,
+						       struct kobject *target_kobj,
+						       const char *target_name,
+						       const char *symlink_name)
 {
 	return 0;
 }

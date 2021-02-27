@@ -728,6 +728,12 @@ static int __hw_perf_event_init(struct perf_event *event)
 		goto out;
 	}
 
+	if (si.ribm & CPU_MF_SF_RIBM_NOTAV) {
+		pr_warn("CPU Measurement Facility sampling is temporarily not available\n");
+		err = -EBUSY;
+		goto out;
+	}
+
 	/* Always enable basic sampling */
 	SAMPL_FLAGS(hwc) = PERF_CPUM_SF_BASIC_MODE;
 
@@ -2097,4 +2103,4 @@ out:
 	return err;
 }
 arch_initcall(init_cpum_sampling_pmu);
-core_param(cpum_sfb_size, CPUM_SF_MAX_SDB, sfb_size, 0640);
+core_param(cpum_sfb_size, CPUM_SF_MAX_SDB, sfb_size, 0644);

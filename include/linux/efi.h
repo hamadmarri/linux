@@ -672,6 +672,7 @@ void efi_native_runtime_setup(void);
 #define EFI_CONSOLE_OUT_DEVICE_GUID		EFI_GUID(0xd3b36f2c, 0xd551, 0x11d4,  0x9a, 0x46, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d)
 #define APPLE_PROPERTIES_PROTOCOL_GUID		EFI_GUID(0x91bd12fe, 0xf6c3, 0x44fb,  0xa5, 0xb7, 0x51, 0x22, 0xab, 0x30, 0x3a, 0xe0)
 #define EFI_TCG2_PROTOCOL_GUID			EFI_GUID(0x607f766c, 0x7455, 0x42be,  0x93, 0x0b, 0xe4, 0xd7, 0x6d, 0xb2, 0x72, 0x0f)
+#define EFI_RT_PROPERTIES_TABLE_GUID		EFI_GUID(0xeb66918a, 0x7eef, 0x402a,  0x84, 0x2e, 0x93, 0x1d, 0x21, 0xc3, 0x8a, 0xe9)
 
 #define EFI_IMAGE_SECURITY_DATABASE_GUID	EFI_GUID(0xd719b2cb, 0x3d3a, 0x4596,  0xa3, 0xbc, 0xda, 0xd0, 0x0e, 0x67, 0x65, 0x6f)
 #define EFI_SHIM_LOCK_GUID			EFI_GUID(0x605dab50, 0xe046, 0x4300,  0xab, 0xb6, 0x3d, 0xd8, 0x10, 0xdd, 0x8b, 0x23)
@@ -691,6 +692,9 @@ void efi_native_runtime_setup(void);
 #define LINUX_EFI_TPM_EVENT_LOG_GUID		EFI_GUID(0xb7799cb0, 0xeca2, 0x4943,  0x96, 0x67, 0x1f, 0xae, 0x07, 0xb7, 0x47, 0xfa)
 #define LINUX_EFI_TPM_FINAL_LOG_GUID		EFI_GUID(0x1e2ed096, 0x30e2, 0x4254,  0xbd, 0x89, 0x86, 0x3b, 0xbe, 0xf8, 0x23, 0x25)
 #define LINUX_EFI_MEMRESERVE_TABLE_GUID		EFI_GUID(0x888eb0c6, 0x8ede, 0x4ff5,  0xa8, 0xf0, 0x9a, 0xee, 0x5c, 0xb9, 0x77, 0xc2)
+
+/* OEM GUIDs */
+#define DELLEMC_EFI_RCI2_TABLE_GUID		EFI_GUID(0x2d9f28a2, 0xa886, 0x456a,  0x97, 0xa8, 0xf1, 0x1e, 0xf2, 0x4f, 0xf4, 0x55)
 
 typedef struct {
 	efi_guid_t guid;
@@ -942,6 +946,14 @@ typedef struct {
 #define EFI_PROPERTIES_TABLE_VERSION	0x00010000
 #define EFI_PROPERTIES_RUNTIME_MEMORY_PROTECTION_NON_EXECUTABLE_PE_DATA	0x1
 
+typedef struct {
+	u16 version;
+	u16 length;
+	u32 runtime_services_supported;
+} efi_rt_properties_table_t;
+
+#define EFI_RT_PROPERTIES_TABLE_VERSION	0x1
+
 #define EFI_INVALID_TABLE_ADDR		(~0UL)
 
 typedef struct {
@@ -1016,7 +1028,30 @@ extern struct efi {
 	efi_set_virtual_address_map_t *set_virtual_address_map;
 	struct efi_memory_map memmap;
 	unsigned long flags;
+#ifndef __GENKSYMS__
+	unsigned int  runtime_supported_mask;
+#endif
 } efi;
+
+#define EFI_RT_SUPPORTED_GET_TIME 				0x0001
+#define EFI_RT_SUPPORTED_SET_TIME 				0x0002
+#define EFI_RT_SUPPORTED_GET_WAKEUP_TIME			0x0004
+#define EFI_RT_SUPPORTED_SET_WAKEUP_TIME			0x0008
+#define EFI_RT_SUPPORTED_GET_VARIABLE				0x0010
+#define EFI_RT_SUPPORTED_GET_NEXT_VARIABLE_NAME			0x0020
+#define EFI_RT_SUPPORTED_SET_VARIABLE				0x0040
+#define EFI_RT_SUPPORTED_SET_VIRTUAL_ADDRESS_MAP		0x0080
+#define EFI_RT_SUPPORTED_CONVERT_POINTER			0x0100
+#define EFI_RT_SUPPORTED_GET_NEXT_HIGH_MONOTONIC_COUNT		0x0200
+#define EFI_RT_SUPPORTED_RESET_SYSTEM				0x0400
+#define EFI_RT_SUPPORTED_UPDATE_CAPSULE				0x0800
+#define EFI_RT_SUPPORTED_QUERY_CAPSULE_CAPABILITIES		0x1000
+#define EFI_RT_SUPPORTED_QUERY_VARIABLE_INFO			0x2000
+
+#define EFI_RT_SUPPORTED_ALL					0x3fff
+
+#define EFI_RT_SUPPORTED_TIME_SERVICES				0x000f
+#define EFI_RT_SUPPORTED_VARIABLE_SERVICES			0x0070
 
 extern struct mm_struct efi_mm;
 
@@ -1038,7 +1073,11 @@ extern void *efi_get_pal_addr (void);
 extern void efi_map_pal_code (void);
 extern void efi_memmap_walk (efi_freemem_callback_t callback, void *arg);
 extern void efi_gettimeofday (struct timespec64 *ts);
+#ifdef CONFIG_EFI
 extern void efi_enter_virtual_mode (void);	/* switch EFI to virtual mode, if possible */
+#else
+static inline void efi_enter_virtual_mode (void) {}
+#endif
 #ifdef CONFIG_X86
 extern efi_status_t efi_query_variable_store(u32 attributes,
 					     unsigned long size,
@@ -1201,6 +1240,14 @@ extern int __init efi_setup_pcdp_console(char *);
 #define EFI_DBG			8	/* Print additional debug info at runtime */
 #define EFI_NX_PE_DATA		9	/* Can runtime data regions be mapped non-executable? */
 #define EFI_MEM_ATTR		10	/* Did firmware publish an EFI_MEMORY_ATTRIBUTES table? */
+#define EFI_SECURE_BOOT		11	/* Are we in Secure Boot mode? */
+
+enum efi_secureboot_mode {
+	efi_secureboot_mode_unset,
+	efi_secureboot_mode_unknown,
+	efi_secureboot_mode_disabled,
+	efi_secureboot_mode_enabled,
+};
 
 #ifdef CONFIG_EFI
 /*
@@ -1212,7 +1259,12 @@ static inline bool efi_enabled(int feature)
 }
 extern void efi_reboot(enum reboot_mode reboot_mode, const char *__unused);
 
-extern bool efi_is_table_address(unsigned long phys_addr);
+static inline bool efi_rt_services_supported(unsigned int mask)
+{
+	return (efi.runtime_supported_mask & mask) == mask;
+}
+
+extern void __init efi_set_secure_boot(enum efi_secureboot_mode mode);
 #else
 static inline bool efi_enabled(int feature)
 {
@@ -1227,13 +1279,16 @@ efi_capsule_pending(int *reset_type)
 	return false;
 }
 
-static inline bool efi_is_table_address(unsigned long phys_addr)
+static inline bool efi_rt_services_supported(unsigned int mask)
 {
 	return false;
 }
+
+static inline void efi_set_secure_boot(enum efi_secureboot_mode mode) {}
 #endif
 
 extern int efi_status_to_err(efi_status_t status);
+extern const char *efi_status_to_str(efi_status_t status);
 
 /*
  * Variable Attributes
@@ -1489,6 +1544,7 @@ int efivars_register(struct efivars *efivars,
 int efivars_unregister(struct efivars *efivars);
 struct kobject *efivars_kobject(void);
 
+int efivar_supports_writes(void);
 int efivar_init(int (*func)(efi_char16_t *, efi_guid_t, unsigned long, void *),
 		void *data, bool duplicates, struct list_head *head);
 
@@ -1636,12 +1692,6 @@ static inline bool efi_runtime_disabled(void) { return true; }
 extern void efi_call_virt_check_flags(unsigned long flags, const char *call);
 extern unsigned long efi_call_virt_save_flags(void);
 
-enum efi_secureboot_mode {
-	efi_secureboot_mode_unset,
-	efi_secureboot_mode_unknown,
-	efi_secureboot_mode_disabled,
-	efi_secureboot_mode_enabled,
-};
 enum efi_secureboot_mode efi_get_secureboot(efi_system_table_t *sys_table);
 
 #ifdef CONFIG_RESET_ATTACK_MITIGATION
@@ -1736,6 +1786,8 @@ struct efi_tcg2_final_events_table {
 };
 extern int efi_tpm_final_log_size;
 
+extern unsigned long rci2_table_phys;
+
 /*
  * efi_runtime_service() function identifiers.
  * "NONE" is used by efi_recover_from_page_fault() to check if the page
@@ -1797,4 +1849,33 @@ struct linux_efi_memreserve {
 #define EFI_MEMRESERVE_COUNT(size) (((size) - sizeof(struct linux_efi_memreserve)) \
 	/ sizeof(((struct linux_efi_memreserve *)0)->entry[0]))
 
+#ifdef CONFIG_EFI_SECRET_KEY
+#define EFI_SECRET_GUID \
+	EFI_GUID(0x8c136d32, 0x039a, 0x4016, 0x8b, 0xb4, 0x9e, 0x98, 0x5e, 0x62, 0x78, 0x6f)
+#define SECRET_KEY_SIZE        64
+#define EFI_SECRET_KEY_REGEN \
+	((efi_char16_t [15]) { 'S', 'e', 'c', 'r', 'e', 't', 'K', 'e', 'y', 'R', 'e', 'g', 'e', 'n', 0 })
+#define EFI_SECRET_KEY_REGEN_ATTRIBUTE (EFI_VARIABLE_NON_VOLATILE | \
+					EFI_VARIABLE_BOOTSERVICE_ACCESS | \
+					EFI_VARIABLE_RUNTIME_ACCESS)
+struct efi_skey_setup_data {
+	unsigned long detect_status;
+	unsigned long final_status;
+	unsigned long key_size;
+	u8 secret_key[SECRET_KEY_SIZE];
+};
+extern void *get_efi_secret_key(void);
+extern void efi_skey_stop_regen(void);
+extern void efi_skey_set_regen(void);
+extern int efi_skey_sysfs_init(struct kobject *efi_kobj);
+#else
+#define SECRET_KEY_SIZE        0
+static inline void *get_efi_secret_key(void)
+{
+	return NULL;
+}
+static inline void efi_skey_stop_regen(void) {}
+static inline void efi_skey_set_regen(void) {}
+static inline int efi_skey_sysfs_init(struct kobject *efi_kobj) { return 0; }
+#endif /* CONFIG_EFI_SECRET_KEY */
 #endif /* _LINUX_EFI_H */

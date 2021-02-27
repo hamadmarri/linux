@@ -15,6 +15,8 @@
 #include <linux/percpu.h>
 #include <linux/export.h>
 #include <linux/irq_work.h>
+#include <linux/extable.h>
+#include <linux/ftrace.h>
 
 #include <asm/machdep.h>
 #include <asm/mce.h>
@@ -34,7 +36,7 @@ static DEFINE_PER_CPU(struct machine_check_event[MAX_MC_EVT],
 
 static void machine_check_process_queued_event(struct irq_work *work);
 static void machine_check_ue_irq_work(struct irq_work *work);
-void machine_check_ue_event(struct machine_check_event *evt);
+static void machine_check_ue_event(struct machine_check_event *evt);
 static void machine_process_ue_event(struct work_struct *work);
 
 static struct irq_work mce_event_process_work = {
@@ -149,6 +151,7 @@ void save_mce_event(struct pt_regs *regs, long handled,
 		if (phys_addr != ULONG_MAX) {
 			mce->u.ue_error.physical_address_provided = true;
 			mce->u.ue_error.physical_address = phys_addr;
+			mce->u.ue_error.ignore_event = mce_err->ignore_event;
 			machine_check_ue_event(mce);
 		}
 	}
@@ -212,7 +215,7 @@ static void machine_check_ue_irq_work(struct irq_work *work)
 /*
  * Queue up the MCE event which then can be handled later.
  */
-void machine_check_ue_event(struct machine_check_event *evt)
+static void machine_check_ue_event(struct machine_check_event *evt)
 {
 	int index;
 
@@ -250,6 +253,19 @@ void machine_check_queue_event(void)
 	/* Queue irq work to process this event later. */
 	irq_work_queue(&mce_event_process_work);
 }
+
+void mce_common_process_ue(struct pt_regs *regs,
+			   struct mce_error_info *mce_err)
+{
+	const struct exception_table_entry *entry;
+
+	entry = search_kernel_exception_table(regs->nip);
+	if (entry) {
+		mce_err->ignore_event = true;
+		regs->nip = extable_fixup(entry);
+	}
+}
+
 /*
  * process pending MCE event from the mce event queue. This function will be
  * called during syscall exit.
@@ -266,8 +282,17 @@ static void machine_process_ue_event(struct work_struct *work)
 		/*
 		 * This should probably queued elsewhere, but
 		 * oh! well
+		 *
+		 * Don't report this machine check because the caller has a
+		 * asked us to ignore the event, it has a fixup handler which
+		 * will do the appropriate error handling and reporting.
 		 */
 		if (evt->error_type == MCE_ERROR_TYPE_UE) {
+			if (evt->u.ue_error.ignore_event) {
+				__this_cpu_dec(mce_ue_count);
+				continue;
+			}
+
 			if (evt->u.ue_error.physical_address_provided) {
 				unsigned long pfn;
 
@@ -301,6 +326,12 @@ static void machine_check_process_queued_event(struct irq_work *work)
 	while (__this_cpu_read(mce_queue_count) > 0) {
 		index = __this_cpu_read(mce_queue_count) - 1;
 		evt = this_cpu_ptr(&mce_event_queue[index]);
+
+		if (evt->error_type == MCE_ERROR_TYPE_UE &&
+		    evt->u.ue_error.ignore_event) {
+			__this_cpu_dec(mce_queue_count);
+			continue;
+		}
 		machine_check_print_event_info(evt, false, false);
 		__this_cpu_dec(mce_queue_count);
 	}
@@ -309,7 +340,7 @@ static void machine_check_process_queued_event(struct irq_work *work)
 void machine_check_print_event_info(struct machine_check_event *evt,
 				    bool user_mode, bool in_guest)
 {
-	const char *level, *sevstr, *subtype, *err_type;
+	const char *level, *sevstr, *subtype, *err_type, *initiator;
 	uint64_t ea = 0, pa = 0;
 	int n = 0;
 	char dar_str[50];
@@ -394,6 +425,28 @@ void machine_check_print_event_info(struct machine_check_event *evt,
 		break;
 	}
 
+	switch(evt->initiator) {
+	case MCE_INITIATOR_CPU:
+		initiator = "CPU";
+		break;
+	case MCE_INITIATOR_PCI:
+		initiator = "PCI";
+		break;
+	case MCE_INITIATOR_ISA:
+		initiator = "ISA";
+		break;
+	case MCE_INITIATOR_MEMORY:
+		initiator = "Memory";
+		break;
+	case MCE_INITIATOR_POWERMGM:
+		initiator = "Power Management";
+		break;
+	case MCE_INITIATOR_UNKNOWN:
+	default:
+		initiator = "Unknown";
+		break;
+	}
+
 	switch (evt->error_type) {
 	case MCE_ERROR_TYPE_UE:
 		err_type = "UE";
@@ -460,6 +513,14 @@ void machine_check_print_event_info(struct machine_check_event *evt,
 		if (evt->u.link_error.effective_address_provided)
 			ea = evt->u.link_error.effective_address;
 		break;
+	case MCE_ERROR_TYPE_DCACHE:
+		err_type = "D-Cache";
+		subtype = "Unknown";
+		break;
+	case MCE_ERROR_TYPE_ICACHE:
+		err_type = "I-Cache";
+		subtype = "Unknown";
+		break;
 	default:
 	case MCE_ERROR_TYPE_UNKNOWN:
 		err_type = "Unknown";
@@ -492,9 +553,17 @@ void machine_check_print_event_info(struct machine_check_event *evt,
 			level, evt->cpu, evt->srr0, (void *)evt->srr0, pa_str);
 	}
 
+	printk("%sMCE: CPU%d: Initiator %s\n", level, evt->cpu, initiator);
+
 	subtype = evt->error_class < ARRAY_SIZE(mc_error_class) ?
 		mc_error_class[evt->error_class] : "Unknown";
 	printk("%sMCE: CPU%d: %s\n", level, evt->cpu, subtype);
+
+#ifdef CONFIG_PPC_BOOK3S_64
+	/* Display faulty slb contents for SLB errors. */
+	if (evt->error_type == MCE_ERROR_TYPE_SLB)
+		slb_dump_contents(local_paca->mce_faulty_slbs);
+#endif
 }
 EXPORT_SYMBOL_GPL(machine_check_print_event_info);
 
@@ -503,9 +572,12 @@ EXPORT_SYMBOL_GPL(machine_check_print_event_info);
  *
  * regs->nip and regs->msr contains srr0 and ssr1.
  */
-long machine_check_early(struct pt_regs *regs)
+long notrace machine_check_early(struct pt_regs *regs)
 {
 	long handled = 0;
+	u8 ftrace_enabled = this_cpu_get_ftrace_enabled();
+
+	this_cpu_set_ftrace_enabled(0);
 
 	hv_nmi_check_nonrecoverable(regs);
 
@@ -514,6 +586,9 @@ long machine_check_early(struct pt_regs *regs)
 	 */
 	if (ppc_md.machine_check_early)
 		handled = ppc_md.machine_check_early(regs);
+
+	this_cpu_set_ftrace_enabled(ftrace_enabled);
+
 	return handled;
 }
 

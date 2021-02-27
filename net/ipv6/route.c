@@ -95,7 +95,8 @@ static int		ip6_pkt_prohibit(struct sk_buff *skb);
 static int		ip6_pkt_prohibit_out(struct net *net, struct sock *sk, struct sk_buff *skb);
 static void		ip6_link_failure(struct sk_buff *skb);
 static void		ip6_rt_update_pmtu(struct dst_entry *dst, struct sock *sk,
-					   struct sk_buff *skb, u32 mtu);
+					   struct sk_buff *skb, u32 mtu,
+					   bool confirm_neigh);
 static void		rt6_do_redirect(struct dst_entry *dst, struct sock *sk,
 					struct sk_buff *skb);
 static int rt6_score_route(const struct fib6_nh *nh, u32 fib6_flags, int oif,
@@ -264,7 +265,8 @@ static unsigned int ip6_blackhole_mtu(const struct dst_entry *dst)
 }
 
 static void ip6_rt_blackhole_update_pmtu(struct dst_entry *dst, struct sock *sk,
-					 struct sk_buff *skb, u32 mtu)
+					 struct sk_buff *skb, u32 mtu,
+					 bool confirm_neigh)
 {
 }
 
@@ -429,8 +431,11 @@ void fib6_select_path(const struct net *net, struct fib6_result *res,
 	struct fib6_info *sibling, *next_sibling;
 	struct fib6_info *match = res->f6i;
 
-	if ((!match->fib6_nsiblings && !match->nh) || have_oif_match)
+	if (!match->nh && (!match->fib6_nsiblings || have_oif_match))
 		goto out;
+
+	if (match->nh && have_oif_match && res->nh)
+		return;
 
 	/* We might have already computed the hash for ICMPv6 errors. In such
 	 * case it will always be non-zero. Otherwise now is the time to do it.
@@ -1479,11 +1484,11 @@ static u32 rt6_exception_hash(const struct in6_addr *dst,
 	u32 val;
 
 	net_get_random_once(&seed, sizeof(seed));
-	val = jhash(dst, sizeof(*dst), seed);
+	val = jhash2((const u32 *)dst, sizeof(*dst)/sizeof(u32), seed);
 
 #ifdef CONFIG_IPV6_SUBTREES
 	if (src)
-		val = jhash(src, sizeof(*src), val);
+		val = jhash2((const u32 *)src, sizeof(*src)/sizeof(u32), val);
 #endif
 	return hash_32(val, FIB6_EXCEPTION_BUCKET_SIZE_SHIFT);
 }
@@ -2295,10 +2300,7 @@ static void ip6_multipath_l3_keys(const struct sk_buff *skb,
 	if (!icmph)
 		goto out;
 
-	if (icmph->icmp6_type != ICMPV6_DEST_UNREACH &&
-	    icmph->icmp6_type != ICMPV6_PKT_TOOBIG &&
-	    icmph->icmp6_type != ICMPV6_TIME_EXCEED &&
-	    icmph->icmp6_type != ICMPV6_PARAMPROB)
+	if (!icmpv6_is_err(icmph->icmp6_type))
 		goto out;
 
 	inner_iph = skb_header_pointer(skb,
@@ -2695,13 +2697,16 @@ static bool rt6_cache_allowed_for_pmtu(const struct rt6_info *rt)
 }
 
 static void __ip6_rt_update_pmtu(struct dst_entry *dst, const struct sock *sk,
-				 const struct ipv6hdr *iph, u32 mtu)
+				 const struct ipv6hdr *iph, u32 mtu,
+				 bool confirm_neigh)
 {
 	const struct in6_addr *daddr, *saddr;
 	struct rt6_info *rt6 = (struct rt6_info *)dst;
 
-	if (dst_metric_locked(dst, RTAX_MTU))
-		return;
+	/* Note: do *NOT* check dst_metric_locked(dst, RTAX_MTU)
+	 * IPv6 pmtu discovery isn't optional, so 'mtu lock' cannot disable it.
+	 * [see also comment in rt6_mtu_change_route()]
+	 */
 
 	if (iph) {
 		daddr = &iph->daddr;
@@ -2713,7 +2718,10 @@ static void __ip6_rt_update_pmtu(struct dst_entry *dst, const struct sock *sk,
 		daddr = NULL;
 		saddr = NULL;
 	}
-	dst_confirm_neigh(dst, daddr);
+
+	if (confirm_neigh)
+		dst_confirm_neigh(dst, daddr);
+
 	mtu = max_t(u32, mtu, IPV6_MIN_MTU);
 	if (mtu >= dst_mtu(dst))
 		return;
@@ -2769,9 +2777,11 @@ static void __ip6_rt_update_pmtu(struct dst_entry *dst, const struct sock *sk,
 }
 
 static void ip6_rt_update_pmtu(struct dst_entry *dst, struct sock *sk,
-			       struct sk_buff *skb, u32 mtu)
+			       struct sk_buff *skb, u32 mtu,
+			       bool confirm_neigh)
 {
-	__ip6_rt_update_pmtu(dst, sk, skb ? ipv6_hdr(skb) : NULL, mtu);
+	__ip6_rt_update_pmtu(dst, sk, skb ? ipv6_hdr(skb) : NULL, mtu,
+			     confirm_neigh);
 }
 
 void ip6_update_pmtu(struct sk_buff *skb, struct net *net, __be32 mtu,
@@ -2790,7 +2800,7 @@ void ip6_update_pmtu(struct sk_buff *skb, struct net *net, __be32 mtu,
 
 	dst = ip6_route_output(net, NULL, &fl6);
 	if (!dst->error)
-		__ip6_rt_update_pmtu(dst, NULL, iph, ntohl(mtu));
+		__ip6_rt_update_pmtu(dst, NULL, iph, ntohl(mtu), true);
 	dst_release(dst);
 }
 EXPORT_SYMBOL_GPL(ip6_update_pmtu);
@@ -3373,7 +3383,7 @@ static bool fib6_is_reject(u32 flags, struct net_device *dev, int addr_type)
 	if ((flags & RTF_REJECT) ||
 	    (dev && (dev->flags & IFF_LOOPBACK) &&
 	     !(addr_type & IPV6_ADDR_LOOPBACK) &&
-	     !(flags & RTF_LOCAL)))
+	     !(flags & (RTF_ANYCAST | RTF_LOCAL))))
 		return true;
 
 	return false;
@@ -3650,12 +3660,12 @@ static struct fib6_info *ip6_route_info_create(struct fib6_config *cfg,
 	rt->fib6_src.plen = cfg->fc_src_len;
 #endif
 	if (nh) {
-		if (!nexthop_get(nh)) {
-			NL_SET_ERR_MSG(extack, "Nexthop has been deleted");
-			goto out;
-		}
 		if (rt->fib6_src.plen) {
 			NL_SET_ERR_MSG(extack, "Nexthops can not be used with source routing");
+			goto out;
+		}
+		if (!nexthop_get(nh)) {
+			NL_SET_ERR_MSG(extack, "Nexthop has been deleted");
 			goto out;
 		}
 		rt->nh = nh;
@@ -5149,6 +5159,7 @@ static int ip6_route_multipath_add(struct fib6_config *cfg,
 		 */
 		cfg->fc_nlinfo.nlh->nlmsg_flags &= ~(NLM_F_EXCL |
 						     NLM_F_REPLACE);
+		cfg->fc_nlinfo.nlh->nlmsg_flags |= NLM_F_CREATE;
 		nhn++;
 	}
 
@@ -6204,6 +6215,9 @@ static int __net_init ip6_route_net_init(struct net *net)
 	dst_init_metrics(&net->ipv6.ip6_blk_hole_entry->dst,
 			 ip6_template_metrics, true);
 	INIT_LIST_HEAD(&net->ipv6.ip6_blk_hole_entry->rt6i_uncached);
+#ifdef CONFIG_IPV6_SUBTREES
+	net->ipv6.fib6_routes_require_src = 0;
+#endif
 #endif
 
 	net->ipv6.sysctl.flush_delay = 0;

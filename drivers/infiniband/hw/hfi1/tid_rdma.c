@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 /*
- * Copyright(c) 2018 Intel Corporation.
+ * Copyright(c) 2018 - 2020 Intel Corporation.
  *
  */
 
@@ -194,7 +194,7 @@ void tid_rdma_opfn_init(struct rvt_qp *qp, struct tid_rdma_params *p)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 
-	p->qp = (kdeth_qp << 16) | priv->rcd->ctxt;
+	p->qp = (RVT_KDETH_QP_PREFIX << 16) | priv->rcd->ctxt;
 	p->max_len = TID_RDMA_MAX_SEGMENT_SIZE;
 	p->jkey = priv->rcd->jkey;
 	p->max_read = TID_RDMA_MAX_READ_SEGS_PER_REQ;
@@ -2664,6 +2664,9 @@ static bool handle_read_kdeth_eflags(struct hfi1_ctxtdata *rcd,
 	u32 fpsn;
 
 	lockdep_assert_held(&qp->r_lock);
+	trace_hfi1_rsp_read_kdeth_eflags(qp, ibpsn);
+	trace_hfi1_sender_read_kdeth_eflags(qp);
+	trace_hfi1_tid_read_sender_kdeth_eflags(qp, 0);
 	spin_lock(&qp->s_lock);
 	/* If the psn is out of valid range, drop the packet */
 	if (cmp_psn(ibpsn, qp->s_last_psn) < 0 ||
@@ -2728,6 +2731,8 @@ static bool handle_read_kdeth_eflags(struct hfi1_ctxtdata *rcd,
 		goto s_unlock;
 
 	req = wqe_to_tid_req(wqe);
+	trace_hfi1_tid_req_read_kdeth_eflags(qp, 0, wqe->wr.opcode, wqe->psn,
+					     wqe->lpsn, req);
 	switch (rcv_type) {
 	case RHF_RCV_TYPE_EXPECTED:
 		switch (rte) {
@@ -2742,6 +2747,9 @@ static bool handle_read_kdeth_eflags(struct hfi1_ctxtdata *rcd,
 			 * packets that could be still in the fabric.
 			 */
 			flow = &req->flows[req->clear_tail];
+			trace_hfi1_tid_flow_read_kdeth_eflags(qp,
+							      req->clear_tail,
+							      flow);
 			if (priv->s_flags & HFI1_R_TID_SW_PSN) {
 				diff = cmp_psn(psn,
 					       flow->flow_state.r_next_psn);
@@ -3207,6 +3215,7 @@ bool hfi1_tid_rdma_wqe_interlock(struct rvt_qp *qp, struct rvt_swqe *wqe)
 	case IB_WR_ATOMIC_CMP_AND_SWP:
 	case IB_WR_ATOMIC_FETCH_AND_ADD:
 	case IB_WR_RDMA_WRITE:
+	case IB_WR_RDMA_WRITE_WITH_IMM:
 		switch (prev->wr.opcode) {
 		case IB_WR_TID_RDMA_WRITE:
 			req = wqe_to_tid_req(prev);
@@ -4625,6 +4634,15 @@ void hfi1_rc_rcv_tid_rdma_ack(struct hfi1_packet *packet)
 			 */
 			fpsn = full_flow_psn(flow, flow->flow_state.spsn);
 			req->r_ack_psn = psn;
+			/*
+			 * If resync_psn points to the last flow PSN for a
+			 * segment and the new segment (likely from a new
+			 * request) starts with a new generation number, we
+			 * need to adjust resync_psn accordingly.
+			 */
+			if (flow->flow_state.generation !=
+			    (resync_psn >> HFI1_KDETH_BTH_SEQ_SHIFT))
+				resync_psn = mask_psn(fpsn - 1);
 			flow->resync_npkts +=
 				delta_psn(mask_psn(resync_psn + 1), fpsn);
 			/*
@@ -5389,7 +5407,10 @@ static bool _hfi1_schedule_tid_send(struct rvt_qp *qp)
 	struct hfi1_ibport *ibp =
 		to_iport(qp->ibqp.device, qp->port_num);
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
-	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+	struct hfi1_devdata *dd = ppd->dd;
+
+	if ((dd->flags & HFI1_SHUTDOWN))
+		return true;
 
 	return iowait_tid_schedule(&priv->s_iowait, ppd->hfi1_wq,
 				   priv->s_sde ?

@@ -154,7 +154,7 @@ static inline void exit_tasks_rcu_finish(void) { }
  *
  * This macro resembles cond_resched(), except that it is defined to
  * report potential quiescent states to RCU-tasks even if the cond_resched()
- * machinery were to be shut off, as some advocate for PREEMPT kernels.
+ * machinery were to be shut off, as some advocate for PREEMPTION kernels.
  */
 #define cond_resched_tasks_rcu_qs() \
 do { \
@@ -376,20 +376,22 @@ do {									      \
 } while (0)
 
 /**
- * rcu_swap_protected() - swap an RCU and a regular pointer
- * @rcu_ptr: RCU pointer
+ * rcu_replace_pointer() - replace an RCU pointer, returning its old value
+ * @rcu_ptr: RCU pointer, whose old value is returned
  * @ptr: regular pointer
- * @c: the conditions under which the dereference will take place
+ * @c: the lockdep conditions under which the dereference will take place
  *
- * Perform swap(@rcu_ptr, @ptr) where @rcu_ptr is an RCU-annotated pointer and
- * @c is the argument that is passed to the rcu_dereference_protected() call
- * used to read that pointer.
+ * Perform a replacement, where @rcu_ptr is an RCU-annotated
+ * pointer and @c is the lockdep argument that is passed to the
+ * rcu_dereference_protected() call used to read that pointer.  The old
+ * value of @rcu_ptr is returned, and @rcu_ptr is set to @ptr.
  */
-#define rcu_swap_protected(rcu_ptr, ptr, c) do {			\
+#define rcu_replace_pointer(rcu_ptr, ptr, c)				\
+({									\
 	typeof(ptr) __tmp = rcu_dereference_protected((rcu_ptr), (c));	\
 	rcu_assign_pointer((rcu_ptr), (ptr));				\
-	(ptr) = __tmp;							\
-} while (0)
+	__tmp;								\
+})
 
 /**
  * rcu_access_pointer() - fetch RCU pointer with no dereferencing
@@ -573,12 +575,12 @@ do {									      \
  *
  * You can avoid reading and understanding the next paragraph by
  * following this rule: don't put anything in an rcu_read_lock() RCU
- * read-side critical section that would block in a !PREEMPT kernel.
+ * read-side critical section that would block in a !PREEMPTION kernel.
  * But if you want the full story, read on!
  *
  * In non-preemptible RCU implementations (TREE_RCU and TINY_RCU),
  * it is illegal to block while in an RCU read-side critical section.
- * In preemptible RCU implementations (PREEMPT_RCU) in CONFIG_PREEMPT
+ * In preemptible RCU implementations (PREEMPT_RCU) in CONFIG_PREEMPTION
  * kernel builds, RCU read-side critical sections may be preempted,
  * but explicit blocking is illegal.  Finally, in preemptible RCU
  * implementations in real-time (with -rt patchset) kernel builds, RCU

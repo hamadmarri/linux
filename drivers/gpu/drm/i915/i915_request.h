@@ -26,8 +26,10 @@
 #define I915_REQUEST_H
 
 #include <linux/dma-fence.h>
+#include <linux/irq_work.h>
 #include <linux/lockdep.h>
 
+#include "gt/intel_context_types.h"
 #include "gt/intel_engine_types.h"
 
 #include "i915_gem.h"
@@ -40,8 +42,8 @@
 struct drm_file;
 struct drm_i915_gem_object;
 struct i915_request;
-struct i915_timeline;
-struct i915_timeline_cacheline;
+struct intel_timeline;
+struct intel_timeline_cacheline;
 
 struct i915_capture_list {
 	struct i915_capture_list *next;
@@ -61,6 +63,18 @@ enum {
 	 * See i915_request_is_active()
 	 */
 	I915_FENCE_FLAG_ACTIVE = DMA_FENCE_FLAG_USER_BITS,
+
+	/*
+	 * I915_FENCE_FLAG_PQUEUE - this request is ready for execution
+	 *
+	 * Using the scheduler, when a request is ready for execution it is put
+	 * into the priority queue, and removed from that queue when transferred
+	 * to the HW runlists. We want to track its membership within the
+	 * priority queue so that we can easily check before rescheduling.
+	 *
+	 * See i915_request_in_priority_queue()
+	 */
+	I915_FENCE_FLAG_PQUEUE,
 
 	/*
 	 * I915_FENCE_FLAG_SIGNAL - this request is currently on signal_list
@@ -112,7 +126,7 @@ struct i915_request {
 	struct intel_engine_cs *engine;
 	struct intel_context *hw_context;
 	struct intel_ring *ring;
-	struct i915_timeline *timeline;
+	struct intel_timeline __rcu *timeline;
 	struct list_head signal_link;
 
 	/*
@@ -175,7 +189,7 @@ struct i915_request {
 	 * inside the timeline's HWSP vma, but it is only valid while this
 	 * request has not completed and guarded by the timeline mutex.
 	 */
-	struct i915_timeline_cacheline *hwsp_cacheline;
+	struct intel_timeline_cacheline *hwsp_cacheline;
 
 	/** Position in the ring of the start of the request */
 	u32 head;
@@ -215,13 +229,12 @@ struct i915_request {
 	/** Time at which this request was emitted, in jiffies. */
 	unsigned long emitted_jiffies;
 
-	bool waitboost;
+	unsigned long flags;
+#define I915_REQUEST_WAITBOOST BIT(0)
+#define I915_REQUEST_NOPREEMPT BIT(1)
 
 	/** timeline->request entry for this request */
 	struct list_head link;
-
-	/** ring->request_list entry for this request */
-	struct list_head ring_link;
 
 	struct drm_i915_file_private *file_priv;
 	/** file_priv list entry for this request */
@@ -248,6 +261,8 @@ struct i915_request * __must_check
 i915_request_create(struct intel_context *ce);
 
 struct i915_request *__i915_request_commit(struct i915_request *request);
+void __i915_request_queue(struct i915_request *rq,
+			  const struct i915_sched_attr *attr);
 
 void i915_request_retire_upto(struct i915_request *rq);
 
@@ -290,7 +305,7 @@ int i915_request_await_execution(struct i915_request *rq,
 
 void i915_request_add(struct i915_request *rq);
 
-void __i915_request_submit(struct i915_request *request);
+bool __i915_request_submit(struct i915_request *request);
 void i915_request_submit(struct i915_request *request);
 
 void i915_request_skip(struct i915_request *request, int error);
@@ -323,6 +338,11 @@ static inline bool i915_request_is_active(const struct i915_request *rq)
 	return test_bit(I915_FENCE_FLAG_ACTIVE, &rq->fence.flags);
 }
 
+static inline bool i915_request_in_priority_queue(const struct i915_request *rq)
+{
+	return test_bit(I915_FENCE_FLAG_PQUEUE, &rq->fence.flags);
+}
+
 /**
  * Returns true if seq1 is later than seq2.
  */
@@ -333,7 +353,9 @@ static inline bool i915_seqno_passed(u32 seq1, u32 seq2)
 
 static inline u32 __hwsp_seqno(const struct i915_request *rq)
 {
-	return READ_ONCE(*rq->hwsp_seqno);
+	const u32 *hwsp = READ_ONCE(rq->hwsp_seqno);
+
+	return READ_ONCE(*hwsp);
 }
 
 /**
@@ -426,7 +448,39 @@ static inline bool i915_request_completed(const struct i915_request *rq)
 
 static inline void i915_request_mark_complete(struct i915_request *rq)
 {
-	rq->hwsp_seqno = (u32 *)&rq->fence.seqno; /* decouple from HWSP */
+	WRITE_ONCE(rq->hwsp_seqno, /* decouple from HWSP */
+		   (u32 *)&rq->fence.seqno);
+}
+
+static inline bool i915_request_has_waitboost(const struct i915_request *rq)
+{
+	return rq->flags & I915_REQUEST_WAITBOOST;
+}
+
+static inline bool i915_request_has_nopreempt(const struct i915_request *rq)
+{
+	/* Preemption should only be disabled very rarely */
+	return unlikely(rq->flags & I915_REQUEST_NOPREEMPT);
+}
+
+static inline struct intel_timeline *
+i915_request_timeline(struct i915_request *rq)
+{
+	/* Valid only while the request is being constructed (or retired). */
+	return rcu_dereference_protected(rq->timeline,
+					 lockdep_is_held(&rcu_access_pointer(rq->timeline)->mutex));
+}
+
+static inline struct intel_timeline *
+i915_request_active_timeline(struct i915_request *rq)
+{
+	/*
+	 * When in use during submission, we are protected by a guarantee that
+	 * the context/timeline is pinned and must remain pinned until after
+	 * this submission.
+	 */
+	return rcu_dereference_protected(rq->timeline,
+					 lockdep_is_held(&rq->engine->active.lock));
 }
 
 bool i915_retire_requests(struct drm_i915_private *i915);

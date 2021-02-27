@@ -70,6 +70,9 @@
 #include <linux/nospec.h>
 #include <linux/sizes.h>
 #include <linux/hugetlb.h>
+#ifndef __GENKSYMS__
+#include <linux/fs_struct.h>
+#endif
 
 #include <uapi/linux/io_uring.h>
 
@@ -260,7 +263,7 @@ struct io_ring_ctx {
 
 	struct user_struct	*user;
 
-	struct cred		*creds;
+	const struct cred	*creds;
 
 	struct completion	ctx_done;
 
@@ -342,9 +345,12 @@ struct io_kiocb {
 #define REQ_F_FAIL_LINK		256	/* fail rest of links */
 #define REQ_F_ISREG		2048	/* regular file */
 #define REQ_F_MUST_PUNT		4096	/* must be punted even for NONBLOCK */
+	unsigned long		fsize;
 	u64			user_data;
 	u32			result;
 	u32			sequence;
+
+	struct fs_struct	*fs;
 
 	struct work_struct	work;
 };
@@ -599,6 +605,7 @@ static struct io_kiocb *io_get_req(struct io_ring_ctx *ctx,
 	/* one is dropped after submission, the other at completion */
 	refcount_set(&req->refs, 2);
 	req->result = 0;
+	req->fs = NULL;
 	return req;
 out:
 	io_ring_drop_ctx_refs(ctx, 1);
@@ -830,11 +837,17 @@ static void io_iopoll_reap_events(struct io_ring_ctx *ctx)
 	mutex_unlock(&ctx->uring_lock);
 }
 
-static int __io_iopoll_check(struct io_ring_ctx *ctx, unsigned *nr_events,
-			    long min)
+static int io_iopoll_check(struct io_ring_ctx *ctx, unsigned *nr_events,
+			   long min)
 {
 	int iters = 0, ret = 0;
 
+	/*
+	 * We disallow the app entering submit/complete with polling, but we
+	 * still need to lock the ring to prevent racing with polled issue
+	 * that got punted to a workqueue.
+	 */
+	mutex_lock(&ctx->uring_lock);
 	do {
 		int tmin = 0;
 
@@ -870,21 +883,6 @@ static int __io_iopoll_check(struct io_ring_ctx *ctx, unsigned *nr_events,
 		ret = 0;
 	} while (min && !*nr_events && !need_resched());
 
-	return ret;
-}
-
-static int io_iopoll_check(struct io_ring_ctx *ctx, unsigned *nr_events,
-			   long min)
-{
-	int ret;
-
-	/*
-	 * We disallow the app entering submit/complete with polling, but we
-	 * still need to lock the ring to prevent racing with polled issue
-	 * that got punted to a workqueue.
-	 */
-	mutex_lock(&ctx->uring_lock);
-	ret = __io_iopoll_check(ctx, nr_events, min);
 	mutex_unlock(&ctx->uring_lock);
 	return ret;
 }
@@ -1037,6 +1035,9 @@ static int io_prep_rw(struct io_kiocb *req, const struct sqe_submit *s,
 
 	if (S_ISREG(file_inode(req->file)->i_mode))
 		req->flags |= REQ_F_ISREG;
+
+	if (force_nonblock)
+		req->fsize = rlimit(RLIMIT_FSIZE);
 
 	/*
 	 * If the file doesn't support async, mark it as REQ_F_MUST_PUNT so
@@ -1379,7 +1380,14 @@ static int io_write(struct io_kiocb *req, const struct sqe_submit *s,
 		}
 		kiocb->ki_flags |= IOCB_WRITE;
 
+		if (!force_nonblock)
+			current->signal->rlim[RLIMIT_FSIZE].rlim_cur = req->fsize;
+
 		ret2 = call_write_iter(file, kiocb, &iter);
+
+		if (!force_nonblock)
+			current->signal->rlim[RLIMIT_FSIZE].rlim_cur = RLIM_INFINITY;
+
 		if (!force_nonblock || ret2 != -EAGAIN) {
 			io_rw_done(kiocb, ret2);
 		} else {
@@ -1539,6 +1547,16 @@ static int io_send_recvmsg(struct io_kiocb *req, const struct io_uring_sqe *sqe,
 			ret = -EINTR;
 	}
 
+	if (req->fs) {
+		struct fs_struct *fs = req->fs;
+
+		spin_lock(&req->fs->lock);
+		if (--fs->users)
+			fs = NULL;
+		spin_unlock(&req->fs->lock);
+		if (fs)
+			free_fs_struct(fs);
+	}
 	io_cqring_add_event(req->ctx, sqe->user_data, ret);
 	io_put_req(req);
 	return 0;
@@ -1913,6 +1931,7 @@ static inline bool io_sqe_needs_user(const struct io_uring_sqe *sqe)
 static void io_sq_wq_submit_work(struct work_struct *work)
 {
 	struct io_kiocb *req = container_of(work, struct io_kiocb, work);
+	struct fs_struct *old_fs_struct = current->fs;
 	struct io_ring_ctx *ctx = req->ctx;
 	struct mm_struct *cur_mm = NULL;
 	struct async_list *async_list;
@@ -1932,13 +1951,22 @@ restart:
 		/* Ensure we clear previously set non-block flag */
 		req->rw.ki_flags &= ~IOCB_NOWAIT;
 
+		if (req->fs != current->fs && current->fs != old_fs_struct) {
+			task_lock(current);
+			if (req->fs)
+				current->fs = req->fs;
+			else
+				current->fs = old_fs_struct;
+			task_unlock(current);
+		}
+
 		ret = 0;
 		if (io_sqe_needs_user(sqe) && !cur_mm) {
 			if (!mmget_not_zero(ctx->sqo_mm)) {
 				ret = -EFAULT;
 			} else {
 				cur_mm = ctx->sqo_mm;
-				use_mm(cur_mm);
+				kthread_use_mm(cur_mm);
 				old_fs = get_fs();
 				set_fs(USER_DS);
 			}
@@ -2026,10 +2054,15 @@ restart:
 out:
 	if (cur_mm) {
 		set_fs(old_fs);
-		unuse_mm(cur_mm);
+		kthread_unuse_mm(cur_mm);
 		mmput(cur_mm);
 	}
 	revert_creds(old_cred);
+	if (old_fs_struct) {
+		task_lock(current);
+		current->fs = old_fs_struct;
+		task_unlock(current);
+	}
 }
 
 /*
@@ -2204,6 +2237,23 @@ err:
 
 	req->user_data = s->sqe->user_data;
 
+#if defined(CONFIG_NET)
+	switch (READ_ONCE(s->sqe->opcode)) {
+	case IORING_OP_SENDMSG:
+	case IORING_OP_RECVMSG:
+		spin_lock(&current->fs->lock);
+		if (!current->fs->in_exec) {
+			req->fs = current->fs;
+			req->fs->users++;
+		}
+		spin_unlock(&current->fs->lock);
+		if (!req->fs) {
+			ret = -EAGAIN;
+			goto err_req;
+		}
+	}
+#endif
+
 	/*
 	 * If we already have a head request, queue this one for async
 	 * submittal once the head completes. If we don't have a head but
@@ -2315,12 +2365,13 @@ static bool io_get_sqring(struct io_ring_ctx *ctx, struct sqe_submit *s)
 }
 
 static int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr,
-			  bool has_user, bool mm_fault)
+			  struct mm_struct **mm)
 {
 	struct io_submit_state state, *statep = NULL;
 	struct io_kiocb *link = NULL;
 	bool prev_was_link = false;
 	int i, submitted = 0;
+	bool mm_fault = false;
 
 	if (nr > IO_PLUG_THRESHOLD) {
 		io_submit_state_start(&state, ctx, nr);
@@ -2333,6 +2384,14 @@ static int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr,
 		if (!io_get_sqring(ctx, &s))
 			break;
 
+		if (io_sqe_needs_user(s.sqe) && !*mm) {
+			mm_fault = mm_fault || !mmget_not_zero(ctx->sqo_mm);
+			if (!mm_fault) {
+				kthread_use_mm(ctx->sqo_mm);
+				*mm = ctx->sqo_mm;
+			}
+		}
+
 		/*
 		 * If previous wasn't linked and we have a linked command,
 		 * that's the end of the chain. Submit the previous link.
@@ -2343,16 +2402,11 @@ static int io_submit_sqes(struct io_ring_ctx *ctx, unsigned int nr,
 		}
 		prev_was_link = (s.sqe->flags & IOSQE_IO_LINK) != 0;
 
-		if (unlikely(mm_fault)) {
-			io_cqring_add_event(ctx, s.sqe->user_data,
-						-EFAULT);
-		} else {
-			s.has_user = has_user;
-			s.needs_lock = true;
-			s.needs_fixed_file = true;
-			io_submit_sqe(ctx, &s, statep, &link);
-			submitted++;
-		}
+		s.has_user = *mm != NULL;
+		s.needs_lock = true;
+		s.needs_fixed_file = true;
+		io_submit_sqe(ctx, &s, statep, &link);
+		submitted++;
 	}
 
 	if (link)
@@ -2381,7 +2435,6 @@ static int io_sq_thread(void *data)
 
 	timeout = inflight = 0;
 	while (!kthread_should_park()) {
-		bool mm_fault = false;
 		unsigned int to_submit;
 
 		if (inflight) {
@@ -2398,7 +2451,7 @@ static int io_sq_thread(void *data)
 				 */
 				mutex_lock(&ctx->uring_lock);
 				if (!list_empty(&ctx->poll_list))
-					__io_iopoll_check(ctx, &nr_events, 0);
+					io_iopoll_getevents(ctx, &nr_events, 0);
 				else
 					inflight = 0;
 				mutex_unlock(&ctx->uring_lock);
@@ -2418,6 +2471,18 @@ static int io_sq_thread(void *data)
 		to_submit = io_sqring_entries(ctx);
 		if (!to_submit) {
 			/*
+			 * Drop cur_mm before scheduling, we can't hold it for
+			 * long periods (or over schedule()). Do this before
+			 * adding ourselves to the waitqueue, as the unuse/drop
+			 * may sleep.
+			 */
+			if (cur_mm) {
+				kthread_unuse_mm(cur_mm);
+				mmput(cur_mm);
+				cur_mm = NULL;
+			}
+
+			/*
 			 * We're polling. If we're within the defined idle
 			 * period, then let us spin without work before going
 			 * to sleep.
@@ -2425,18 +2490,6 @@ static int io_sq_thread(void *data)
 			if (inflight || !time_after(jiffies, timeout)) {
 				cpu_relax();
 				continue;
-			}
-
-			/*
-			 * Drop cur_mm before scheduling, we can't hold it for
-			 * long periods (or over schedule()). Do this before
-			 * adding ourselves to the waitqueue, as the unuse/drop
-			 * may sleep.
-			 */
-			if (cur_mm) {
-				unuse_mm(cur_mm);
-				mmput(cur_mm);
-				cur_mm = NULL;
 			}
 
 			prepare_to_wait(&ctx->sqo_wait, &wait,
@@ -2466,18 +2519,8 @@ static int io_sq_thread(void *data)
 			ctx->sq_ring->flags &= ~IORING_SQ_NEED_WAKEUP;
 		}
 
-		/* Unless all new commands are FIXED regions, grab mm */
-		if (!cur_mm) {
-			mm_fault = !mmget_not_zero(ctx->sqo_mm);
-			if (!mm_fault) {
-				use_mm(ctx->sqo_mm);
-				cur_mm = ctx->sqo_mm;
-			}
-		}
-
 		to_submit = min(to_submit, ctx->sq_entries);
-		inflight += io_submit_sqes(ctx, to_submit, cur_mm != NULL,
-					   mm_fault);
+		inflight += io_submit_sqes(ctx, to_submit, &cur_mm);
 
 		/* Commit SQ ring head once we've consumed all SQEs */
 		io_commit_sqring(ctx);
@@ -2485,7 +2528,7 @@ static int io_sq_thread(void *data)
 
 	set_fs(old_fs);
 	if (cur_mm) {
-		unuse_mm(cur_mm);
+		kthread_unuse_mm(cur_mm);
 		mmput(cur_mm);
 	}
 	revert_creds(old_cred);
@@ -2650,13 +2693,6 @@ static int __io_sqe_files_scm(struct io_ring_ctx *ctx, int nr, int offset)
 	struct scm_fp_list *fpl;
 	struct sk_buff *skb;
 	int i;
-
-	if (!capable(CAP_SYS_RESOURCE) && !capable(CAP_SYS_ADMIN)) {
-		unsigned long inflight = ctx->user->unix_inflight + nr;
-
-		if (inflight > task_rlimit(current, RLIMIT_NOFILE))
-			return -EMFILE;
-	}
 
 	fpl = kzalloc(sizeof(*fpl), GFP_KERNEL);
 	if (!fpl)
@@ -3010,8 +3046,8 @@ static int io_sqe_buffer_register(struct io_ring_ctx *ctx, void __user *arg,
 
 		ret = 0;
 		if (!pages || nr_pages > got_pages) {
-			kfree(vmas);
-			kfree(pages);
+			kvfree(vmas);
+			kvfree(pages);
 			pages = kvmalloc_array(nr_pages, sizeof(struct page *),
 						GFP_KERNEL);
 			vmas = kvmalloc_array(nr_pages,
@@ -3235,7 +3271,7 @@ static int io_uring_mmap(struct file *file, struct vm_area_struct *vma)
 	}
 
 	page = virt_to_head_page(ptr);
-	if (sz > (PAGE_SIZE << compound_order(page)))
+	if (sz > page_size(page))
 		return -EINVAL;
 
 	pfn = virt_to_phys(ptr) >> PAGE_SHIFT;
@@ -3437,7 +3473,7 @@ static int io_uring_create(unsigned entries, struct io_uring_params *p)
 	ctx->account_mem = account_mem;
 	ctx->user = user;
 
-	ctx->creds = prepare_creds();
+	ctx->creds = get_current_cred();
 	if (!ctx->creds) {
 		ret = -ENOMEM;
 		goto err;

@@ -257,6 +257,11 @@ static bool linear_make_request(struct mddev *mddev, struct bio *bio)
 		     bio_sector < start_sector))
 		goto out_of_bounds;
 
+	if (unlikely(is_mddev_broken(tmp_dev->rdev, "linear"))) {
+		bio_io_error(bio);
+		return true;
+	}
+
 	if (unlikely(bio_end_sector(bio) > end_sector)) {
 		/* This bio crosses a device boundary, so we have to split it */
 		struct bio *split = bio_split(bio, end_sector - bio_sector,
@@ -266,6 +271,7 @@ static bool linear_make_request(struct mddev *mddev, struct bio *bio)
 		bio = split;
 	}
 
+	md_io_acct(mddev, bio_op(bio), bio_sectors(bio));
 	bio_set_dev(bio, tmp_dev->rdev->bdev);
 	bio->bi_iter.bi_sector = bio->bi_iter.bi_sector -
 		start_sector + data_offset;

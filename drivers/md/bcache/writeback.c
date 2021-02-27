@@ -122,6 +122,10 @@ static void __update_writeback_rate(struct cached_dev *dc)
 static bool set_at_max_writeback_rate(struct cache_set *c,
 				       struct cached_dev *dc)
 {
+	/* Don't sst max writeback rate if it is disabled */
+	if (!c->idle_max_writeback_rate_enabled)
+		return false;
+
 	/* Don't set max writeback rate if gc is running */
 	if (!c->gc_mark_valid)
 		return false;
@@ -798,7 +802,7 @@ void bch_sectors_dirty_init(struct bcache_device *d)
 			schedule_timeout_interruptible(
 				msecs_to_jiffies(INIT_KEYS_SLEEP_MS));
 		else if (ret < 0) {
-			pr_warn("sectors dirty init failed, ret=%d!", ret);
+			pr_warn("sectors dirty init failed, ret=%d!\n", ret);
 			break;
 		}
 	} while (ret == -EAGAIN);

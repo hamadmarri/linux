@@ -425,8 +425,7 @@ static void __device_link_del(struct kref *kref)
 	dev_dbg(link->consumer, "Dropping the link to %s\n",
 		dev_name(link->supplier));
 
-	if (link->flags & DL_FLAG_PM_RUNTIME)
-		pm_runtime_drop_link(link->consumer);
+	pm_runtime_drop_link(link);
 
 	list_del_rcu(&link->s_node);
 	list_del_rcu(&link->c_node);
@@ -440,8 +439,7 @@ static void __device_link_del(struct kref *kref)
 	dev_info(link->consumer, "Dropping the link to %s\n",
 		 dev_name(link->supplier));
 
-	if (link->flags & DL_FLAG_PM_RUNTIME)
-		pm_runtime_drop_link(link->consumer);
+	pm_runtime_drop_link(link);
 
 	list_del(&link->s_node);
 	list_del(&link->c_node);
@@ -3371,9 +3369,9 @@ static inline bool fwnode_is_primary(struct fwnode_handle *fwnode)
  */
 void set_primary_fwnode(struct device *dev, struct fwnode_handle *fwnode)
 {
-	if (fwnode) {
-		struct fwnode_handle *fn = dev->fwnode;
+	struct fwnode_handle *fn = dev->fwnode;
 
+	if (fwnode) {
 		if (fwnode_is_primary(fn))
 			fn = fn->secondary;
 
@@ -3383,8 +3381,12 @@ void set_primary_fwnode(struct device *dev, struct fwnode_handle *fwnode)
 		}
 		dev->fwnode = fwnode;
 	} else {
-		dev->fwnode = fwnode_is_primary(dev->fwnode) ?
-			dev->fwnode->secondary : NULL;
+		if (fwnode_is_primary(fn)) {
+			dev->fwnode = fn->secondary;
+			fn->secondary = NULL;
+		} else {
+			dev->fwnode = NULL;
+		}
 	}
 }
 EXPORT_SYMBOL_GPL(set_primary_fwnode);
@@ -3425,8 +3427,31 @@ void device_set_of_node_from_dev(struct device *dev, const struct device *dev2)
 }
 EXPORT_SYMBOL_GPL(device_set_of_node_from_dev);
 
+int device_match_name(struct device *dev, const void *name)
+{
+	return sysfs_streq(dev_name(dev), name);
+}
+EXPORT_SYMBOL_GPL(device_match_name);
+
 int device_match_of_node(struct device *dev, const void *np)
 {
 	return dev->of_node == np;
 }
 EXPORT_SYMBOL_GPL(device_match_of_node);
+
+int device_match_fwnode(struct device *dev, const void *fwnode)
+{
+	return dev_fwnode(dev) == fwnode;
+}
+EXPORT_SYMBOL_GPL(device_match_fwnode);
+
+void dev_enable_async_probe(struct device *dev, bool enabled)
+{
+	if (!dev->p) {
+		if (device_private_init(dev))
+			return;
+	}
+	if (dev->p)
+		dev->p->async_probe_enabled = enabled;
+}
+EXPORT_SYMBOL_GPL(dev_enable_async_probe);

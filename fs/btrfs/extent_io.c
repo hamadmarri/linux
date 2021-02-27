@@ -14,6 +14,7 @@
 #include <linux/prefetch.h>
 #include <linux/cleancache.h>
 #include "extent_io.h"
+#include "extent-io-tree.h"
 #include "extent_map.h"
 #include "ctree.h"
 #include "btrfs_inode.h"
@@ -34,36 +35,59 @@ static inline bool extent_state_in_tree(const struct extent_state *state)
 }
 
 #ifdef CONFIG_BTRFS_DEBUG
-static LIST_HEAD(buffers);
 static LIST_HEAD(states);
-
 static DEFINE_SPINLOCK(leak_lock);
 
-static inline
-void btrfs_leak_debug_add(struct list_head *new, struct list_head *head)
+static inline void btrfs_leak_debug_add(spinlock_t *lock,
+					struct list_head *new,
+					struct list_head *head)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&leak_lock, flags);
+	spin_lock_irqsave(lock, flags);
 	list_add(new, head);
-	spin_unlock_irqrestore(&leak_lock, flags);
+	spin_unlock_irqrestore(lock, flags);
 }
 
-static inline
-void btrfs_leak_debug_del(struct list_head *entry)
+static inline void btrfs_leak_debug_del(spinlock_t *lock,
+					struct list_head *entry)
 {
 	unsigned long flags;
 
-	spin_lock_irqsave(&leak_lock, flags);
+	spin_lock_irqsave(lock, flags);
 	list_del(entry);
-	spin_unlock_irqrestore(&leak_lock, flags);
+	spin_unlock_irqrestore(lock, flags);
 }
 
-static inline
-void btrfs_leak_debug_check(void)
+void btrfs_extent_buffer_leak_debug_check(struct btrfs_fs_info *fs_info)
+{
+	struct extent_buffer *eb;
+	unsigned long flags;
+
+	/*
+	 * If we didn't get into open_ctree our allocated_ebs will not be
+	 * initialized, so just skip this.
+	 */
+	if (!fs_info->allocated_ebs.next)
+		return;
+
+	spin_lock_irqsave(&fs_info->eb_leak_lock, flags);
+	while (!list_empty(&fs_info->allocated_ebs)) {
+		eb = list_first_entry(&fs_info->allocated_ebs,
+				      struct extent_buffer, leak_list);
+		pr_err(
+	"BTRFS: buffer leak start %llu len %lu refs %d bflags %lu owner %llu\n",
+		       eb->start, eb->len, atomic_read(&eb->refs), eb->bflags,
+		       btrfs_header_owner(eb));
+		list_del(&eb->leak_list);
+		kmem_cache_free(extent_buffer_cache, eb);
+	}
+	spin_unlock_irqrestore(&fs_info->eb_leak_lock, flags);
+}
+
+static inline void btrfs_extent_state_leak_debug_check(void)
 {
 	struct extent_state *state;
-	struct extent_buffer *eb;
 
 	while (!list_empty(&states)) {
 		state = list_entry(states.next, struct extent_state, leak_list);
@@ -73,14 +97,6 @@ void btrfs_leak_debug_check(void)
 		       refcount_read(&state->refs));
 		list_del(&state->leak_list);
 		kmem_cache_free(extent_state_cache, state);
-	}
-
-	while (!list_empty(&buffers)) {
-		eb = list_entry(buffers.next, struct extent_buffer, leak_list);
-		pr_err("BTRFS: buffer leak start %llu len %lu refs %d bflags %lu\n",
-		       eb->start, eb->len, atomic_read(&eb->refs), eb->bflags);
-		list_del(&eb->leak_list);
-		kmem_cache_free(extent_buffer_cache, eb);
 	}
 }
 
@@ -103,9 +119,9 @@ static inline void __btrfs_debug_check_extent_io_range(const char *caller,
 	}
 }
 #else
-#define btrfs_leak_debug_add(new, head)	do {} while (0)
-#define btrfs_leak_debug_del(entry)	do {} while (0)
-#define btrfs_leak_debug_check()	do {} while (0)
+#define btrfs_leak_debug_add(lock, new, head)	do {} while (0)
+#define btrfs_leak_debug_del(lock, entry)	do {} while (0)
+#define btrfs_extent_state_leak_debug_check()	do {} while (0)
 #define btrfs_debug_check_extent_io_range(c, s, e)	do {} while (0)
 #endif
 
@@ -196,19 +212,23 @@ static int __must_check flush_write_bio(struct extent_page_data *epd)
 	return ret;
 }
 
-int __init extent_io_init(void)
+int __init extent_state_cache_init(void)
 {
 	extent_state_cache = kmem_cache_create("btrfs_extent_state",
 			sizeof(struct extent_state), 0,
 			SLAB_MEM_SPREAD, NULL);
 	if (!extent_state_cache)
 		return -ENOMEM;
+	return 0;
+}
 
+int __init extent_io_init(void)
+{
 	extent_buffer_cache = kmem_cache_create("btrfs_extent_buffer",
 			sizeof(struct extent_buffer), 0,
 			SLAB_MEM_SPREAD, NULL);
 	if (!extent_buffer_cache)
-		goto free_state_cache;
+		return -ENOMEM;
 
 	if (bioset_init(&btrfs_bioset, BIO_POOL_SIZE,
 			offsetof(struct btrfs_io_bio, bio),
@@ -226,26 +246,34 @@ free_bioset:
 free_buffer_cache:
 	kmem_cache_destroy(extent_buffer_cache);
 	extent_buffer_cache = NULL;
-
-free_state_cache:
-	kmem_cache_destroy(extent_state_cache);
-	extent_state_cache = NULL;
 	return -ENOMEM;
+}
+
+void __cold extent_state_cache_exit(void)
+{
+	btrfs_extent_state_leak_debug_check();
+	kmem_cache_destroy(extent_state_cache);
 }
 
 void __cold extent_io_exit(void)
 {
-	btrfs_leak_debug_check();
-
 	/*
 	 * Make sure all delayed rcu free are flushed before we
 	 * destroy caches.
 	 */
 	rcu_barrier();
-	kmem_cache_destroy(extent_state_cache);
 	kmem_cache_destroy(extent_buffer_cache);
 	bioset_exit(&btrfs_bioset);
 }
+
+/*
+ * For the file_extent_tree, we want to hold the inode lock when we lookup and
+ * update the disk_i_size, but lockdep will complain because our io_tree we hold
+ * the tree lock and get the inode lock when setting delalloc.  These two things
+ * are unrelated, so make a class for the file_extent_tree so we don't get the
+ * two locking patterns mixed up.
+ */
+static struct lock_class_key file_extent_tree_class;
 
 void extent_io_tree_init(struct btrfs_fs_info *fs_info,
 			 struct extent_io_tree *tree, unsigned int owner,
@@ -258,6 +286,8 @@ void extent_io_tree_init(struct btrfs_fs_info *fs_info,
 	spin_lock_init(&tree->lock);
 	tree->private_data = private_data;
 	tree->owner = owner;
+	if (owner == IO_TREE_INODE_FILE_EXTENT)
+		lockdep_set_class(&tree->lock, &file_extent_tree_class);
 }
 
 void extent_io_tree_release(struct extent_io_tree *tree)
@@ -304,7 +334,7 @@ static struct extent_state *alloc_extent_state(gfp_t mask)
 	state->state = 0;
 	state->failrec = NULL;
 	RB_CLEAR_NODE(&state->rb_node);
-	btrfs_leak_debug_add(&state->leak_list, &states);
+	btrfs_leak_debug_add(&leak_lock, &state->leak_list, &states);
 	refcount_set(&state->refs, 1);
 	init_waitqueue_head(&state->wq);
 	trace_alloc_extent_state(state, mask, _RET_IP_);
@@ -317,7 +347,7 @@ void free_extent_state(struct extent_state *state)
 		return;
 	if (refcount_dec_and_test(&state->refs)) {
 		WARN_ON(extent_state_in_tree(state));
-		btrfs_leak_debug_del(&state->leak_list);
+		btrfs_leak_debug_del(&leak_lock, &state->leak_list);
 		trace_free_extent_state(state, _RET_IP_);
 		kmem_cache_free(extent_state_cache, state);
 	}
@@ -1043,6 +1073,16 @@ hit_next:
 			goto out;
 		}
 
+		/*
+		 * If this extent already has all the bits we want set, then
+		 * skip it, not necessary to split it or do anything with it.
+		 */
+		if ((state->state & bits) == bits) {
+			start = state->end + 1;
+			cache_state(state, cached_state);
+			goto search_again;
+		}
+
 		prealloc = alloc_extent_state_atomic(prealloc);
 		BUG_ON(!prealloc);
 		err = split_state(tree, state, prealloc, start);
@@ -1558,6 +1598,43 @@ out:
 }
 
 /**
+ * find_contiguous_extent_bit: find a contiguous area of bits
+ * @tree - io tree to check
+ * @start - offset to start the search from
+ * @start_ret - the first offset we found with the bits set
+ * @end_ret - the final contiguous range of the bits that were set
+ * @bits - bits to look for
+ *
+ * set_extent_bit and clear_extent_bit can temporarily split contiguous ranges
+ * to set bits appropriately, and then merge them again.  During this time it
+ * will drop the tree->lock, so use this helper if you want to find the actual
+ * contiguous area for given bits.  We will search to the first bit we find, and
+ * then walk down the tree until we find a non-contiguous area.  The area
+ * returned will be the full contiguous area with the bits set.
+ */
+int find_contiguous_extent_bit(struct extent_io_tree *tree, u64 start,
+			       u64 *start_ret, u64 *end_ret, unsigned bits)
+{
+	struct extent_state *state;
+	int ret = 1;
+
+	spin_lock(&tree->lock);
+	state = find_first_extent_bit_state(tree, start, bits);
+	if (state) {
+		*start_ret = state->start;
+		*end_ret = state->end;
+		while ((state = next_state(state)) != NULL) {
+			if (state->start > (*end_ret + 1))
+				break;
+			*end_ret = state->end;
+		}
+		ret = 0;
+	}
+	spin_unlock(&tree->lock);
+	return ret;
+}
+
+/**
  * find_first_clear_extent_bit - find the first range that has @bits not set.
  * This range could start before @start.
  *
@@ -1583,21 +1660,25 @@ void find_first_clear_extent_bit(struct extent_io_tree *tree, u64 start,
 	/* Find first extent with bits cleared */
 	while (1) {
 		node = __etree_search(tree, start, &next, &prev, NULL, NULL);
-		if (!node) {
+		if (!node && !next && !prev) {
+			/*
+			 * Tree is completely empty, send full range and let
+			 * caller deal with it
+			 */
+			*start_ret = 0;
+			*end_ret = -1;
+			goto out;
+		} else if (!node && !next) {
+			/*
+			 * We are past the last allocated chunk, set start at
+			 * the end of the last extent.
+			 */
+			state = rb_entry(prev, struct extent_state, rb_node);
+			*start_ret = state->end + 1;
+			*end_ret = -1;
+			goto out;
+		} else if (!node) {
 			node = next;
-			if (!node) {
-				/*
-				 * We are past the last allocated chunk,
-				 * set start at the end of the last extent. The
-				 * device alloc tree should never be empty so
-				 * prev is always set.
-				 */
-				ASSERT(prev);
-				state = rb_entry(prev, struct extent_state, rb_node);
-				*start_ret = state->end + 1;
-				*end_ret = -1;
-				goto out;
-			}
 		}
 		/*
 		 * At this point 'node' either contains 'start' or start is
@@ -1919,7 +2000,8 @@ static int __process_pages_contig(struct address_space *mapping,
 				if (!PageDirty(pages[i]) ||
 				    pages[i]->mapping != mapping) {
 					unlock_page(pages[i]);
-					put_page(pages[i]);
+					for (; i < ret; i++)
+						put_page(pages[i]);
 					err = -EAGAIN;
 					goto out;
 				}
@@ -1938,9 +2020,9 @@ out:
 }
 
 void extent_clear_unlock_delalloc(struct inode *inode, u64 start, u64 end,
-				 u64 delalloc_end, struct page *locked_page,
-				 unsigned clear_bits,
-				 unsigned long page_ops)
+				  struct page *locked_page,
+				  unsigned clear_bits,
+				  unsigned long page_ops)
 {
 	clear_extent_bit(&BTRFS_I(inode)->io_tree, start, end, clear_bits, 1, 0,
 			 NULL);
@@ -3033,7 +3115,7 @@ __get_extent_map(struct inode *inode, struct page *page, size_t pg_offset,
 		*em_cached = NULL;
 	}
 
-	em = get_extent(BTRFS_I(inode), page, pg_offset, start, len, 0);
+	em = get_extent(BTRFS_I(inode), page, pg_offset, start, len);
 	if (em_cached && !IS_ERR_OR_NULL(em)) {
 		BUG_ON(*em_cached);
 		refcount_inc(&em->refs);
@@ -3073,6 +3155,8 @@ static int __do_readpage(struct extent_io_tree *tree,
 	size_t disk_io_size;
 	size_t blocksize = inode->i_sb->s_blocksize;
 	unsigned long this_bio_flag = 0;
+
+	ASSERT(tree == &BTRFS_I(inode)->io_tree);
 
 	set_page_extent_mapped(page);
 
@@ -3149,7 +3233,7 @@ static int __do_readpage(struct extent_io_tree *tree,
 
 		/*
 		 * If we have a file range that points to a compressed extent
-		 * and it's followed by a consecutive file range that points to
+		 * and it's followed by a consecutive file range that points
 		 * to the same compressed extent (possibly with a different
 		 * offset and/or length, so it either points to the whole extent
 		 * or only part of it), we must make sure we do not submit a
@@ -3268,7 +3352,9 @@ static inline void contiguous_readpages(struct extent_io_tree *tree,
 	struct btrfs_inode *inode = BTRFS_I(pages[0]->mapping->host);
 	int index;
 
-	btrfs_lock_and_flush_ordered_range(tree, inode, start, end, NULL);
+	ASSERT(tree == &inode->io_tree);
+
+	btrfs_lock_and_flush_ordered_range(inode, start, end, NULL);
 
 	for (index = 0; index < nr_pages; index++) {
 		__do_readpage(tree, pages[index], btrfs_get_extent, em_cached,
@@ -3289,7 +3375,9 @@ static int __extent_read_full_page(struct extent_io_tree *tree,
 	u64 end = start + PAGE_SIZE - 1;
 	int ret;
 
-	btrfs_lock_and_flush_ordered_range(tree, inode, start, end, NULL);
+	ASSERT(tree == &inode->io_tree);
+
+	btrfs_lock_and_flush_ordered_range(inode, start, end, NULL);
 
 	ret = __do_readpage(tree, page, get_extent, NULL, bio, mirror_num,
 			    bio_flags, read_flags, NULL);
@@ -3302,6 +3390,8 @@ int extent_read_full_page(struct extent_io_tree *tree, struct page *page,
 	struct bio *bio = NULL;
 	unsigned long bio_flags = 0;
 	int ret;
+
+	ASSERT(tree == &BTRFS_I(page->mapping->host)->io_tree);
 
 	ret = __extent_read_full_page(tree, page, get_extent, &bio, mirror_num,
 				      &bio_flags, 0);
@@ -3463,8 +3553,8 @@ static noinline_for_stack int __extent_writepage_io(struct inode *inode,
 							     page_end, 1);
 			break;
 		}
-		em = btrfs_get_extent(BTRFS_I(inode), page, pg_offset, cur,
-				     end - cur + 1, 1);
+		em = btrfs_get_extent(BTRFS_I(inode), NULL, 0, cur,
+				      end - cur + 1);
 		if (IS_ERR_OR_NULL(em)) {
 			SetPageError(page);
 			ret = PTR_ERR_OR_ZERO(em);
@@ -4338,10 +4428,8 @@ int extent_invalidatepage(struct extent_io_tree *tree,
 
 	lock_extent_bits(tree, start, end, &cached_state);
 	wait_on_page_writeback(page);
-	clear_extent_bit(tree, start, end,
-			 EXTENT_LOCKED | EXTENT_DIRTY | EXTENT_DELALLOC |
-			 EXTENT_DO_ACCOUNTING,
-			 1, 1, &cached_state);
+	clear_extent_bit(tree, start, end, EXTENT_LOCKED | EXTENT_DELALLOC |
+			 EXTENT_DO_ACCOUNTING, 1, 1, &cached_state);
 	return 0;
 }
 
@@ -4397,6 +4485,9 @@ int try_release_extent_mapping(struct page *page, gfp_t mask)
 	    page->mapping->host->i_size > SZ_16M) {
 		u64 len;
 		while (start <= end) {
+			struct btrfs_fs_info *fs_info;
+			u64 cur_gen;
+
 			len = end - start + 1;
 			write_lock(&map->lock);
 			em = lookup_extent_mapping(map, start, len);
@@ -4410,15 +4501,45 @@ int try_release_extent_mapping(struct page *page, gfp_t mask)
 				free_extent_map(em);
 				break;
 			}
-			if (!test_range_bit(tree, em->start,
-					    extent_map_end(em) - 1,
-					    EXTENT_LOCKED, 0, NULL)) {
-				set_bit(BTRFS_INODE_NEEDS_FULL_SYNC,
-					&btrfs_inode->runtime_flags);
-				remove_extent_mapping(map, em);
-				/* once for the rb tree */
-				free_extent_map(em);
-			}
+			if (test_range_bit(tree, em->start,
+					   extent_map_end(em) - 1,
+					   EXTENT_LOCKED, 0, NULL))
+				goto next;
+			/*
+			 * If it's not in the list of modified extents, used
+			 * by a fast fsync, we can remove it. If it's being
+			 * logged we can safely remove it since fsync took an
+			 * extra reference on the em.
+			 */
+			if (list_empty(&em->list) ||
+			    test_bit(EXTENT_FLAG_LOGGING, &em->flags))
+				goto remove_em;
+			/*
+			 * If it's in the list of modified extents, remove it
+			 * only if its generation is older then the current one,
+			 * in which case we don't need it for a fast fsync.
+			 * Otherwise don't remove it, we could be racing with an
+			 * ongoing fast fsync that could miss the new extent.
+			 */
+			fs_info = btrfs_inode->root->fs_info;
+			spin_lock(&fs_info->trans_lock);
+			cur_gen = fs_info->generation;
+			spin_unlock(&fs_info->trans_lock);
+			if (em->generation >= cur_gen)
+				goto next;
+remove_em:
+			/*
+			 * We only remove extent maps that are not in the list of
+			 * modified extents or that are in the list but with a
+			 * generation lower then the current generation, so there
+			 * is no need to set the full fsync flag on the inode (it
+			 * hurts the fsync performance for workloads with a data
+			 * size that exceeds or is close to the system's memory).
+			 */
+			remove_extent_mapping(map, em);
+			/* once for the rb tree */
+			free_extent_map(em);
+next:
 			start = extent_map_end(em);
 			write_unlock(&map->lock);
 
@@ -4791,7 +4912,6 @@ out_free_ulist:
 
 static void __free_extent_buffer(struct extent_buffer *eb)
 {
-	btrfs_leak_debug_del(&eb->leak_list);
 	kmem_cache_free(extent_buffer_cache, eb);
 }
 
@@ -4857,6 +4977,7 @@ static void btrfs_release_extent_buffer_pages(struct extent_buffer *eb)
 static inline void btrfs_release_extent_buffer(struct extent_buffer *eb)
 {
 	btrfs_release_extent_buffer_pages(eb);
+	btrfs_leak_debug_del(&eb->fs_info->eb_leak_lock, &eb->leak_list);
 	__free_extent_buffer(eb);
 }
 
@@ -4878,7 +4999,8 @@ __alloc_extent_buffer(struct btrfs_fs_info *fs_info, u64 start,
 	init_waitqueue_head(&eb->write_lock_wq);
 	init_waitqueue_head(&eb->read_lock_wq);
 
-	btrfs_leak_debug_add(&eb->leak_list, &buffers);
+	btrfs_leak_debug_add(&fs_info->eb_leak_lock, &eb->leak_list,
+			     &fs_info->allocated_ebs);
 
 	spin_lock_init(&eb->refs_lock);
 	atomic_set(&eb->refs, 1);
@@ -4969,25 +5091,28 @@ struct extent_buffer *alloc_dummy_extent_buffer(struct btrfs_fs_info *fs_info,
 static void check_buffer_tree_ref(struct extent_buffer *eb)
 {
 	int refs;
-	/* the ref bit is tricky.  We have to make sure it is set
-	 * if we have the buffer dirty.   Otherwise the
-	 * code to free a buffer can end up dropping a dirty
-	 * page
+	/*
+	 * The TREE_REF bit is first set when the extent_buffer is added
+	 * to the radix tree. It is also reset, if unset, when a new reference
+	 * is created by find_extent_buffer.
 	 *
-	 * Once the ref bit is set, it won't go away while the
-	 * buffer is dirty or in writeback, and it also won't
-	 * go away while we have the reference count on the
-	 * eb bumped.
+	 * It is only cleared in two cases: freeing the last non-tree
+	 * reference to the extent_buffer when its STALE bit is set or
+	 * calling releasepage when the tree reference is the only reference.
 	 *
-	 * We can't just set the ref bit without bumping the
-	 * ref on the eb because free_extent_buffer might
-	 * see the ref bit and try to clear it.  If this happens
-	 * free_extent_buffer might end up dropping our original
-	 * ref by mistake and freeing the page before we are able
-	 * to add one more ref.
+	 * In both cases, care is taken to ensure that the extent_buffer's
+	 * pages are not under io. However, releasepage can be concurrently
+	 * called with creating new references, which is prone to race
+	 * conditions between the calls to check_buffer_tree_ref in those
+	 * codepaths and clearing TREE_REF in try_release_extent_buffer.
 	 *
-	 * So bump the ref count first, then set the bit.  If someone
-	 * beat us to it, drop the ref we added.
+	 * The actual lifetime of the extent_buffer in the radix tree is
+	 * adequately protected by the refcount, but the TREE_REF bit and
+	 * its corresponding reference are not. To protect against this
+	 * class of races, we call check_buffer_tree_ref from the codepaths
+	 * which trigger io after they set eb->io_pages. Note that once io is
+	 * initiated, TREE_REF can no longer be cleared, so that is the
+	 * moment at which any such race is best fixed.
 	 */
 	refs = atomic_read(&eb->refs);
 	if (refs >= 2 && test_bit(EXTENT_BUFFER_TREE_REF, &eb->bflags))
@@ -5241,6 +5366,7 @@ static int release_extent_buffer(struct extent_buffer *eb)
 			spin_unlock(&eb->refs_lock);
 		}
 
+		btrfs_leak_debug_del(&eb->fs_info->eb_leak_lock, &eb->leak_list);
 		/* Should be safe to release our pages at this point */
 		btrfs_release_extent_buffer_pages(eb);
 #ifdef CONFIG_BTRFS_FS_RUN_SANITY_TESTS
@@ -5403,6 +5529,8 @@ int read_extent_buffer_pages(struct extent_buffer *eb, int wait, int mirror_num)
 	if (test_bit(EXTENT_BUFFER_UPTODATE, &eb->bflags))
 		return 0;
 
+	ASSERT(tree == &BTRFS_I(eb->pages[0]->mapping->host)->io_tree);
+
 	num_pages = num_extent_pages(eb);
 	for (i = 0; i < num_pages; i++) {
 		page = eb->pages[i];
@@ -5435,6 +5563,11 @@ int read_extent_buffer_pages(struct extent_buffer *eb, int wait, int mirror_num)
 	clear_bit(EXTENT_BUFFER_READ_ERR, &eb->bflags);
 	eb->read_mirror = 0;
 	atomic_set(&eb->io_pages, num_reads);
+	/*
+	 * It is possible for releasepage to clear the TREE_REF bit before we
+	 * set io_pages. See check_buffer_tree_ref for a more detailed comment.
+	 */
+	check_buffer_tree_ref(eb);
 	for (i = 0; i < num_pages; i++) {
 		page = eb->pages[i];
 

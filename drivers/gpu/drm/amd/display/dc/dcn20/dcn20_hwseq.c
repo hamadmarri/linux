@@ -488,7 +488,6 @@ static void dcn20_plane_atomic_disable(struct dc *dc, struct pipe_ctx *pipe_ctx)
 	dpp->funcs->dpp_dppclk_control(dpp, false, false);
 
 	hubp->power_gated = true;
-	dc->optimized_required = false; /* We're powering off, no need to optimize */
 
 	dcn20_plane_atomic_power_down(dc, pipe_ctx);
 
@@ -762,10 +761,6 @@ enum dc_status dcn20_enable_stream_timing(
 			pipe_ctx->pipe_dlg_param.vupdate_width,
 			pipe_ctx->stream->signal,
 			true);
-
-	if (pipe_ctx->stream_res.tg->funcs->setup_global_lock)
-		pipe_ctx->stream_res.tg->funcs->setup_global_lock(
-				pipe_ctx->stream_res.tg);
 
 	if (odm_pipe)
 		odm_pipe->stream_res.opp->funcs->opp_pipe_clock_control(
@@ -1283,6 +1278,25 @@ void dcn20_pipe_control_lock(
 			}
 	}
 
+	if (flip_immediate && lock) {
+		const int TIMEOUT_FOR_FLIP_PENDING = 100000;
+		int i;
+
+		for (i = 0; i < TIMEOUT_FOR_FLIP_PENDING; ++i) {
+			if (!pipe->plane_res.hubp->funcs->hubp_is_flip_pending(pipe->plane_res.hubp))
+				break;
+			udelay(1);
+		}
+
+		if (pipe->bottom_pipe != NULL) {
+			for (i = 0; i < TIMEOUT_FOR_FLIP_PENDING; ++i) {
+				if (!pipe->bottom_pipe->plane_res.hubp->funcs->hubp_is_flip_pending(pipe->bottom_pipe->plane_res.hubp))
+					break;
+				udelay(1);
+			}
+		}
+	}
+
 	/* In flip immediate and pipe splitting case, we need to use GSL
 	 * for synchronization. Only do setup on locking and on flip type change.
 	 */
@@ -1419,16 +1433,16 @@ void dcn20_prepare_bandwidth(
 {
 	struct hubbub *hubbub = dc->res_pool->hubbub;
 
+	dc->clk_mgr->funcs->update_clocks(
+			dc->clk_mgr,
+			context,
+			false);
+
 	/* program dchubbub watermarks */
 	hubbub->funcs->program_watermarks(hubbub,
 					&context->bw_ctx.bw.dcn.watermarks,
 					dc->res_pool->ref_clocks.dchub_ref_clock_inKhz / 1000,
 					false);
-
-	dc->clk_mgr->funcs->update_clocks(
-			dc->clk_mgr,
-			context,
-			false);
 }
 
 void dcn20_optimize_bandwidth(
@@ -1499,7 +1513,8 @@ bool dcn20_update_bandwidth(
 static void dcn20_enable_writeback(
 		struct dc *dc,
 		const struct dc_stream_status *stream_status,
-		struct dc_writeback_info *wb_info)
+		struct dc_writeback_info *wb_info,
+		struct dc_state *context)
 {
 	struct dwbc *dwb;
 	struct mcif_wb *mcif_wb;
@@ -1516,7 +1531,7 @@ static void dcn20_enable_writeback(
 	optc->funcs->set_dwb_source(optc, wb_info->dwb_pipe_inst);
 	/* set MCIF_WB buffer and arbitration configuration */
 	mcif_wb->funcs->config_mcif_buf(mcif_wb, &wb_info->mcif_buf_params, wb_info->dwb_params.dest_height);
-	mcif_wb->funcs->config_mcif_arb(mcif_wb, &dc->current_state->bw_ctx.bw.dcn.bw_writeback.mcif_wb_arb[wb_info->dwb_pipe_inst]);
+	mcif_wb->funcs->config_mcif_arb(mcif_wb, &context->bw_ctx.bw.dcn.bw_writeback.mcif_wb_arb[wb_info->dwb_pipe_inst]);
 	/* Enable MCIF_WB */
 	mcif_wb->funcs->enable_mcif(mcif_wb);
 	/* Enable DWB */

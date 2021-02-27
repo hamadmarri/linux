@@ -64,7 +64,8 @@ static int i40iw_query_device(struct ib_device *ibdev,
 		return -EINVAL;
 	memset(props, 0, sizeof(*props));
 	ether_addr_copy((u8 *)&props->sys_image_guid, iwdev->netdev->dev_addr);
-	props->fw_ver = I40IW_FW_VERSION;
+	props->fw_ver = i40iw_fw_major_ver(&iwdev->sc_dev) << 32 |
+			i40iw_fw_minor_ver(&iwdev->sc_dev);
 	props->device_cap_flags = iwdev->device_cap_flags;
 	props->vendor_id = iwdev->ldev->pcidev->vendor;
 	props->vendor_part_id = iwdev->ldev->pcidev->device;
@@ -97,18 +98,7 @@ static int i40iw_query_port(struct ib_device *ibdev,
 			    u8 port,
 			    struct ib_port_attr *props)
 {
-	struct i40iw_device *iwdev = to_iwdev(ibdev);
-	struct net_device *netdev = iwdev->netdev;
-
-	/* props being zeroed by the caller, avoid zeroing it here */
-	props->max_mtu = IB_MTU_4096;
-	props->active_mtu = ib_mtu_int_to_enum(netdev->mtu);
-
 	props->lid = 1;
-	if (netif_carrier_ok(iwdev->netdev))
-		props->state = IB_PORT_ACTIVE;
-	else
-		props->state = IB_PORT_DOWN;
 	props->port_cap_flags = IB_PORT_CM_SUP | IB_PORT_REINIT_SUP |
 		IB_PORT_VENDOR_CLASS_SUP | IB_PORT_BOOT_MGMT_SUP;
 	props->gid_tbl_len = 1;
@@ -180,8 +170,7 @@ static void i40iw_dealloc_ucontext(struct ib_ucontext *context)
 static int i40iw_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 {
 	struct i40iw_ucontext *ucontext;
-	u64 db_addr_offset;
-	u64 push_offset;
+	u64 db_addr_offset, push_offset, pfn;
 
 	ucontext = to_ucontext(context);
 	if (ucontext->iwdev->sc_dev.is_pf) {
@@ -200,7 +189,6 @@ static int i40iw_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 
 	if (vma->vm_pgoff == (db_addr_offset >> PAGE_SHIFT)) {
 		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
-		vma->vm_private_data = ucontext;
 	} else {
 		if ((vma->vm_pgoff - (push_offset >> PAGE_SHIFT)) % 2)
 			vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
@@ -208,12 +196,12 @@ static int i40iw_mmap(struct ib_ucontext *context, struct vm_area_struct *vma)
 			vma->vm_page_prot = pgprot_writecombine(vma->vm_page_prot);
 	}
 
-	if (io_remap_pfn_range(vma, vma->vm_start,
-			       vma->vm_pgoff + (pci_resource_start(ucontext->iwdev->ldev->pcidev, 0) >> PAGE_SHIFT),
-			       PAGE_SIZE, vma->vm_page_prot))
-		return -EAGAIN;
+	pfn = vma->vm_pgoff +
+	      (pci_resource_start(ucontext->iwdev->ldev->pcidev, 0) >>
+	       PAGE_SHIFT);
 
-	return 0;
+	return rdma_user_mmap_io(context, vma, pfn, PAGE_SIZE,
+				 vma->vm_page_prot, NULL);
 }
 
 /**
@@ -1769,6 +1757,9 @@ static struct ib_mr *i40iw_reg_user_mr(struct ib_pd *pd,
 	int ret;
 	int pg_shift;
 
+	if (!udata)
+		return ERR_PTR(-EOPNOTSUPP);
+
 	if (iwdev->closing)
 		return ERR_PTR(-ENODEV);
 
@@ -2544,10 +2535,11 @@ static const char * const i40iw_hw_stat_names[] = {
 
 static void i40iw_get_dev_fw_str(struct ib_device *dev, char *str)
 {
-	u32 firmware_version = I40IW_FW_VERSION;
+	struct i40iw_device *iwdev = to_iwdev(dev);
 
-	snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u", firmware_version,
-		 (firmware_version & 0x000000ff));
+	snprintf(str, IB_FW_VERSION_NAME_MAX, "%llu.%llu",
+		 i40iw_fw_major_ver(&iwdev->sc_dev),
+		 i40iw_fw_minor_ver(&iwdev->sc_dev));
 }
 
 /**
@@ -2784,6 +2776,10 @@ int i40iw_register_rdma_device(struct i40iw_device *iwdev)
 		return -ENOMEM;
 	iwibdev = iwdev->iwibdev;
 	rdma_set_device_sysfs_group(&iwibdev->ibdev, &i40iw_attr_group);
+	ret = ib_device_set_netdev(&iwibdev->ibdev, iwdev->netdev, 1);
+	if (ret)
+		goto error;
+
 	ret = ib_register_device(&iwibdev->ibdev, "i40iw%d");
 	if (ret)
 		goto error;

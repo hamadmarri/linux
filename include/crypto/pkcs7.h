@@ -9,6 +9,7 @@
 #define _CRYPTO_PKCS7_H
 
 #include <linux/verification.h>
+#include <linux/hash_info.h>
 #include <crypto/public_key.h>
 
 struct key;
@@ -31,6 +32,10 @@ extern int pkcs7_get_content_data(const struct pkcs7_message *pkcs7,
 extern int pkcs7_validate_trust(struct pkcs7_message *pkcs7,
 				struct key *trust_keyring);
 
+extern int __kabi__pkcs7_validate_trust(struct pkcs7_message *pkcs7,
+					struct key *trust_keyring,
+					enum key_being_used_for usage);
+
 /*
  * pkcs7_verify.c
  */
@@ -39,5 +44,8 @@ extern int pkcs7_verify(struct pkcs7_message *pkcs7,
 
 extern int pkcs7_supply_detached_data(struct pkcs7_message *pkcs7,
 				      const void *data, size_t datalen);
+
+extern int pkcs7_get_digest(struct pkcs7_message *pkcs7, const u8 **buf,
+			    u32 *len, enum hash_algo *hash_algo);
 
 #endif /* _CRYPTO_PKCS7_H */

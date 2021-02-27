@@ -1438,6 +1438,7 @@ static void __rtl8169_set_wol(struct rtl8169_private *tp, u32 wolopts)
 	rtl_lock_config_regs(tp);
 
 	device_set_wakeup_enable(tp_to_dev(tp), wolopts);
+	tp->dev->wol_enabled = wolopts ? 1 : 0;
 }
 
 static int rtl8169_set_wol(struct net_device *dev, struct ethtool_wolinfo *wol)
@@ -2148,7 +2149,8 @@ static void rtl_enable_eee(struct rtl8169_private *tp)
 		rtl_set_eee_adv(tp, supported);
 }
 
-static void rtl8169_get_mac_version(struct rtl8169_private *tp)
+static void rtl8169_get_mac_version(struct rtl8169_private *tp,
+				    u8 default_version)
 {
 	/*
 	 * The driver currently handles the 8168Bf and the 8168Be identically
@@ -2224,6 +2226,8 @@ static void rtl8169_get_mac_version(struct rtl8169_private *tp)
 		{ 0x7cf, 0x348,	RTL_GIGA_MAC_VER_07 },
 		{ 0x7cf, 0x248,	RTL_GIGA_MAC_VER_07 },
 		{ 0x7cf, 0x340,	RTL_GIGA_MAC_VER_13 },
+		/* RTL8401, reportedly works if treated as RTL8101e */
+		{ 0x7cf, 0x240,	RTL_GIGA_MAC_VER_13 },
 		{ 0x7cf, 0x343,	RTL_GIGA_MAC_VER_10 },
 		{ 0x7cf, 0x342,	RTL_GIGA_MAC_VER_16 },
 		{ 0x7c8, 0x348,	RTL_GIGA_MAC_VER_09 },
@@ -2252,6 +2256,7 @@ static void rtl8169_get_mac_version(struct rtl8169_private *tp)
 
 	if (tp->mac_version == RTL_GIGA_MAC_NONE) {
 		dev_err(tp_to_dev(tp), "unknown chip XID %03x\n", reg & 0xfcf);
+		tp->mac_version = default_version;
 	} else if (!tp->supports_gmii) {
 		if (tp->mac_version == RTL_GIGA_MAC_VER_42)
 			tp->mac_version = RTL_GIGA_MAC_VER_43;
@@ -3822,7 +3827,8 @@ static void rtl_pll_power_down(struct rtl8169_private *tp)
 	}
 
 	switch (tp->mac_version) {
-	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_33:
+	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_26:
+	case RTL_GIGA_MAC_VER_32 ... RTL_GIGA_MAC_VER_33:
 	case RTL_GIGA_MAC_VER_37:
 	case RTL_GIGA_MAC_VER_39:
 	case RTL_GIGA_MAC_VER_43:
@@ -3849,7 +3855,8 @@ static void rtl_pll_power_down(struct rtl8169_private *tp)
 static void rtl_pll_power_up(struct rtl8169_private *tp)
 {
 	switch (tp->mac_version) {
-	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_33:
+	case RTL_GIGA_MAC_VER_25 ... RTL_GIGA_MAC_VER_26:
+	case RTL_GIGA_MAC_VER_32 ... RTL_GIGA_MAC_VER_33:
 	case RTL_GIGA_MAC_VER_37:
 	case RTL_GIGA_MAC_VER_39:
 	case RTL_GIGA_MAC_VER_43:
@@ -3988,7 +3995,7 @@ static void rtl_hw_jumbo_enable(struct rtl8169_private *tp)
 	case RTL_GIGA_MAC_VER_27 ... RTL_GIGA_MAC_VER_28:
 		r8168dp_hw_jumbo_enable(tp);
 		break;
-	case RTL_GIGA_MAC_VER_31 ... RTL_GIGA_MAC_VER_34:
+	case RTL_GIGA_MAC_VER_31 ... RTL_GIGA_MAC_VER_33:
 		r8168e_hw_jumbo_enable(tp);
 		break;
 	default:
@@ -4014,13 +4021,21 @@ static void rtl_hw_jumbo_disable(struct rtl8169_private *tp)
 	case RTL_GIGA_MAC_VER_27 ... RTL_GIGA_MAC_VER_28:
 		r8168dp_hw_jumbo_disable(tp);
 		break;
-	case RTL_GIGA_MAC_VER_31 ... RTL_GIGA_MAC_VER_34:
+	case RTL_GIGA_MAC_VER_31 ... RTL_GIGA_MAC_VER_33:
 		r8168e_hw_jumbo_disable(tp);
 		break;
 	default:
 		break;
 	}
 	rtl_lock_config_regs(tp);
+}
+
+static void rtl_jumbo_config(struct rtl8169_private *tp, int mtu)
+{
+	if (mtu > ETH_DATA_LEN)
+		rtl_hw_jumbo_enable(tp);
+	else
+		rtl_hw_jumbo_disable(tp);
 }
 
 DECLARE_RTL_COND(rtl_chipcmd_cond)
@@ -4327,11 +4342,6 @@ static void rtl8168g_set_pause_thresholds(struct rtl8169_private *tp,
 static void rtl_hw_start_8168bb(struct rtl8169_private *tp)
 {
 	RTL_W8(tp, Config3, RTL_R8(tp, Config3) & ~Beacon_en);
-
-	if (tp->dev->mtu <= ETH_DATA_LEN) {
-		rtl_tx_performance_tweak(tp, PCI_EXP_DEVCTL_READRQ_4096B |
-					 PCI_EXP_DEVCTL_NOSNOOP_EN);
-	}
 }
 
 static void rtl_hw_start_8168bef(struct rtl8169_private *tp)
@@ -4346,9 +4356,6 @@ static void __rtl_hw_start_8168cp(struct rtl8169_private *tp)
 	RTL_W8(tp, Config1, RTL_R8(tp, Config1) | Speed_down);
 
 	RTL_W8(tp, Config3, RTL_R8(tp, Config3) & ~Beacon_en);
-
-	if (tp->dev->mtu <= ETH_DATA_LEN)
-		rtl_tx_performance_tweak(tp, PCI_EXP_DEVCTL_READRQ_4096B);
 
 	rtl_disable_clock_request(tp);
 }
@@ -4375,9 +4382,6 @@ static void rtl_hw_start_8168cp_2(struct rtl8169_private *tp)
 	rtl_set_def_aspm_entry_latency(tp);
 
 	RTL_W8(tp, Config3, RTL_R8(tp, Config3) & ~Beacon_en);
-
-	if (tp->dev->mtu <= ETH_DATA_LEN)
-		rtl_tx_performance_tweak(tp, PCI_EXP_DEVCTL_READRQ_4096B);
 }
 
 static void rtl_hw_start_8168cp_3(struct rtl8169_private *tp)
@@ -4388,9 +4392,6 @@ static void rtl_hw_start_8168cp_3(struct rtl8169_private *tp)
 
 	/* Magic. */
 	RTL_W8(tp, DBG_REG, 0x20);
-
-	if (tp->dev->mtu <= ETH_DATA_LEN)
-		rtl_tx_performance_tweak(tp, PCI_EXP_DEVCTL_READRQ_4096B);
 }
 
 static void rtl_hw_start_8168c_1(struct rtl8169_private *tp)
@@ -4495,9 +4496,6 @@ static void rtl_hw_start_8168e_1(struct rtl8169_private *tp)
 
 	rtl_ephy_init(tp, e_info_8168e_1);
 
-	if (tp->dev->mtu <= ETH_DATA_LEN)
-		rtl_tx_performance_tweak(tp, PCI_EXP_DEVCTL_READRQ_4096B);
-
 	rtl_disable_clock_request(tp);
 
 	/* Reset tx FIFO pointer */
@@ -4517,9 +4515,6 @@ static void rtl_hw_start_8168e_2(struct rtl8169_private *tp)
 	rtl_set_def_aspm_entry_latency(tp);
 
 	rtl_ephy_init(tp, e_info_8168e_2);
-
-	if (tp->dev->mtu <= ETH_DATA_LEN)
-		rtl_tx_performance_tweak(tp, PCI_EXP_DEVCTL_READRQ_4096B);
 
 	rtl_eri_write(tp, 0xc0, ERIAR_MASK_0011, 0x0000);
 	rtl_eri_write(tp, 0xb8, ERIAR_MASK_0011, 0x0000);
@@ -5199,6 +5194,9 @@ static void rtl_hw_start_8168(struct rtl8169_private *tp)
 		RTL_W8(tp, MaxTxPacketSize, TxPacketMax);
 
 	rtl_hw_config(tp);
+
+	/* disable interrupt coalescing */
+	RTL_W16(tp, IntrMitigate, 0x0000);
 }
 
 static void rtl_hw_start_8169(struct rtl8169_private *tp)
@@ -5222,6 +5220,9 @@ static void rtl_hw_start_8169(struct rtl8169_private *tp)
 	rtl8169_set_magic_reg(tp, tp->mac_version);
 
 	RTL_W32(tp, RxMissed, 0);
+
+	/* disable interrupt coalescing */
+	RTL_W16(tp, IntrMitigate, 0x0000);
 }
 
 static void rtl_hw_start(struct  rtl8169_private *tp)
@@ -5240,10 +5241,10 @@ static void rtl_hw_start(struct  rtl8169_private *tp)
 	rtl_set_rx_tx_desc_registers(tp);
 	rtl_lock_config_regs(tp);
 
-	/* disable interrupt coalescing */
-	RTL_W16(tp, IntrMitigate, 0x0000);
+	rtl_jumbo_config(tp, tp->dev->mtu);
+
 	/* Initially a 10 us delay. Turned it into a PCI commit. - FR */
-	RTL_R8(tp, IntrMask);
+	RTL_R16(tp, CPlusCmd);
 	RTL_W8(tp, ChipCmd, CmdTxEnb | CmdRxEnb);
 	rtl_init_rxcfg(tp);
 	rtl_set_tx_config_registers(tp);
@@ -5258,10 +5259,7 @@ static int rtl8169_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct rtl8169_private *tp = netdev_priv(dev);
 
-	if (new_mtu > ETH_DATA_LEN)
-		rtl_hw_jumbo_enable(tp);
-	else
-		rtl_hw_jumbo_disable(tp);
+	rtl_jumbo_config(tp, new_mtu);
 
 	dev->mtu = new_mtu;
 	netdev_update_features(dev);
@@ -5997,6 +5995,10 @@ process_pkt:
 				goto release_descriptor;
 			}
 
+			dma_sync_single_for_device(tp_to_dev(tp),
+						   le64_to_cpu(desc->addr),
+						   pkt_size, DMA_FROM_DEVICE);
+
 			rtl8169_rx_csum(skb, status);
 			skb_put(skb, pkt_size);
 			skb->protocol = eth_type_trans(skb, dev);
@@ -6048,7 +6050,7 @@ static irqreturn_t rtl8169_interrupt(int irq, void *dev_instance)
 	}
 
 	rtl_irq_disable(tp);
-	napi_schedule_irqoff(&tp->napi);
+	napi_schedule(&tp->napi);
 out:
 	rtl_ack_events(tp, status);
 
@@ -6202,7 +6204,7 @@ static int rtl8169_close(struct net_device *dev)
 
 	phy_disconnect(tp->phydev);
 
-	pci_free_irq(pdev, 0, tp);
+	free_irq(pci_irq_vector(pdev, 0), tp);
 
 	dma_free_coherent(&pdev->dev, R8169_RX_RING_BYTES, tp->RxDescArray,
 			  tp->RxPhyAddr);
@@ -6253,8 +6255,8 @@ static int rtl_open(struct net_device *dev)
 
 	rtl_request_firmware(tp);
 
-	retval = pci_request_irq(pdev, 0, rtl8169_interrupt, NULL, tp,
-				 dev->name);
+	retval = request_irq(pci_irq_vector(pdev, 0), rtl8169_interrupt,
+			     IRQF_SHARED, dev->name, tp);
 	if (retval < 0)
 		goto err_release_fw_2;
 
@@ -6287,7 +6289,7 @@ out:
 	return retval;
 
 err_free_irq:
-	pci_free_irq(pdev, 0, tp);
+	free_irq(pci_irq_vector(pdev, 0), tp);
 err_release_fw_2:
 	rtl_release_firmware(tp);
 	rtl8169_rx_clear(tp);
@@ -6418,6 +6420,10 @@ static int rtl8169_resume(struct device *device)
 	rtl_rar_set(tp, dev->dev_addr);
 
 	clk_prepare_enable(tp->clk);
+
+	/* Reportedly at least Asus X453MA truncates packets otherwise */
+	if (tp->mac_version == RTL_GIGA_MAC_VER_37)
+		rtl_init_rxcfg(tp);
 
 	if (netif_running(dev))
 		__rtl8169_resume(dev);
@@ -6600,7 +6606,7 @@ static int rtl_alloc_irq(struct rtl8169_private *tp)
 		RTL_W8(tp, Config2, RTL_R8(tp, Config2) & ~MSIEnable);
 		rtl_lock_config_regs(tp);
 		/* fall through */
-	case RTL_GIGA_MAC_VER_07 ... RTL_GIGA_MAC_VER_24:
+	case RTL_GIGA_MAC_VER_07 ... RTL_GIGA_MAC_VER_17:
 		flags = PCI_IRQ_LEGACY;
 		break;
 	default:
@@ -6689,6 +6695,13 @@ static int r8169_mdio_register(struct rtl8169_private *tp)
 	if (!tp->phydev) {
 		mdiobus_unregister(new_bus);
 		return -ENODEV;
+	} else if (!tp->phydev->drv) {
+		/* Most chip versions fail with the genphy driver.
+		 * Therefore ensure that the dedicated PHY driver is loaded.
+		 */
+		dev_err(&pdev->dev, "realtek.ko not loaded, maybe it needs to be added to initramfs?\n");
+		mdiobus_unregister(new_bus);
+		return -EUNATCH;
 	}
 
 	/* PHY will be woken up in rtl_open() */
@@ -6828,6 +6841,7 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	struct net_device *dev;
 	int chipset, region;
 	int jumbo_max, rc;
+	u8 default_version;
 
 	dev = devm_alloc_etherdev(&pdev->dev, sizeof (*tp));
 	if (!dev)
@@ -6885,7 +6899,12 @@ static int rtl_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	tp->mmio_addr = pcim_iomap_table(pdev)[region];
 
 	/* Identify chip attached to board */
-	rtl8169_get_mac_version(tp);
+	/* XXX: ugly hack for allowing some backward compatibility with the
+	 * still unsupported chip version for 5.3.y code (bsc#1173085)
+	 */
+	default_version = (ent->device == 0x8168) ?
+		RTL_GIGA_MAC_VER_11 : RTL_GIGA_MAC_NONE;
+	rtl8169_get_mac_version(tp, default_version);
 	if (tp->mac_version == RTL_GIGA_MAC_NONE)
 		return -ENODEV;
 

@@ -446,6 +446,8 @@ static int mlx5_internal_err_ret_value(struct mlx5_core_dev *dev, u16 op,
 	case MLX5_CMD_OP_CREATE_UMEM:
 	case MLX5_CMD_OP_DESTROY_UMEM:
 	case MLX5_CMD_OP_ALLOC_MEMIC:
+	case MLX5_CMD_OP_MODIFY_XRQ:
+	case MLX5_CMD_OP_RELEASE_XRQ_ERROR:
 		*status = MLX5_DRIVER_STATUS_ABORTED;
 		*synd = MLX5_DRIVER_SYND;
 		return -EIO;
@@ -637,6 +639,8 @@ const char *mlx5_command_str(int command)
 	MLX5_COMMAND_STR_CASE(DESTROY_UCTX);
 	MLX5_COMMAND_STR_CASE(CREATE_UMEM);
 	MLX5_COMMAND_STR_CASE(DESTROY_UMEM);
+	MLX5_COMMAND_STR_CASE(RELEASE_XRQ_ERROR);
+	MLX5_COMMAND_STR_CASE(MODIFY_XRQ);
 	default: return "unknown command opcode";
 	}
 }
@@ -857,12 +861,13 @@ static void cmd_work_handler(struct work_struct *work)
 	int alloc_ret;
 	int cmd_mode;
 
+	complete(&ent->handling);
 	sem = ent->page_queue ? &cmd->pages_sem : &cmd->sem;
 	down(sem);
 	if (!ent->page_queue) {
 		alloc_ret = alloc_ent(cmd);
 		if (alloc_ret < 0) {
-			mlx5_core_err(dev, "failed to allocate command entry\n");
+			mlx5_core_err_rl(dev, "failed to allocate command entry\n");
 			if (ent->callback) {
 				ent->callback(-EAGAIN, ent->context);
 				mlx5_free_cmd_msg(dev, ent->out);
@@ -884,7 +889,6 @@ static void cmd_work_handler(struct work_struct *work)
 	}
 
 	cmd->ent_arr[ent->idx] = ent;
-	set_bit(MLX5_CMD_ENT_STATE_PENDING_COMP, &ent->state);
 	lay = get_inst(cmd, ent->idx);
 	ent->lay = lay;
 	memset(lay, 0, sizeof(*lay));
@@ -906,6 +910,7 @@ static void cmd_work_handler(struct work_struct *work)
 
 	if (ent->callback)
 		schedule_delayed_work(&ent->cb_timeout_work, cb_timeout);
+	set_bit(MLX5_CMD_ENT_STATE_PENDING_COMP, &ent->state);
 
 	/* Skip sending command to fw if internal error */
 	if (pci_channel_offline(dev->pdev) ||
@@ -918,6 +923,10 @@ static void cmd_work_handler(struct work_struct *work)
 		MLX5_SET(mbox_out, ent->out, syndrome, drv_synd);
 
 		mlx5_cmd_comp_handler(dev, 1UL << ent->idx, true);
+		/* no doorbell, no need to keep the entry */
+		free_ent(cmd, ent->idx);
+		if (ent->callback)
+			free_cmd(ent);
 		return;
 	}
 
@@ -970,6 +979,11 @@ static int wait_func(struct mlx5_core_dev *dev, struct mlx5_cmd_work_ent *ent)
 	struct mlx5_cmd *cmd = &dev->cmd;
 	int err;
 
+	if (!wait_for_completion_timeout(&ent->handling, timeout) &&
+	    cancel_work_sync(&ent->work)) {
+		ent->ret = -ECANCELED;
+		goto out_err;
+	}
 	if (cmd->mode == CMD_MODE_POLLING || ent->polling) {
 		wait_for_completion(&ent->done);
 	} else if (!wait_for_completion_timeout(&ent->done, timeout)) {
@@ -977,10 +991,15 @@ static int wait_func(struct mlx5_core_dev *dev, struct mlx5_cmd_work_ent *ent)
 		mlx5_cmd_comp_handler(dev, 1UL << ent->idx, true);
 	}
 
+out_err:
 	err = ent->ret;
 
 	if (err == -ETIMEDOUT) {
 		mlx5_core_warn(dev, "%s(0x%x) timeout. Will cause a leak of a command resource\n",
+			       mlx5_command_str(msg_to_opcode(ent->in)),
+			       msg_to_opcode(ent->in));
+	} else if (err == -ECANCELED) {
+		mlx5_core_warn(dev, "%s(0x%x) canceled on out of queue timeout.\n",
 			       mlx5_command_str(msg_to_opcode(ent->in)),
 			       msg_to_opcode(ent->in));
 	}
@@ -1018,6 +1037,7 @@ static int mlx5_cmd_invoke(struct mlx5_core_dev *dev, struct mlx5_cmd_msg *in,
 	ent->token = token;
 	ent->polling = force_polling;
 
+	init_completion(&ent->handling);
 	if (!callback)
 		init_completion(&ent->done);
 
@@ -1037,6 +1057,8 @@ static int mlx5_cmd_invoke(struct mlx5_core_dev *dev, struct mlx5_cmd_msg *in,
 	err = wait_func(dev, ent);
 	if (err == -ETIMEDOUT)
 		goto out;
+	if (err == -ECANCELED)
+		goto out_free;
 
 	ds = ent->ts2 - ent->ts1;
 	op = MLX5_GET(mbox_in, in->first.data, opcode);
@@ -1368,49 +1390,19 @@ static void clean_debug_files(struct mlx5_core_dev *dev)
 	debugfs_remove_recursive(dbg->dbg_root);
 }
 
-static int create_debugfs_files(struct mlx5_core_dev *dev)
+static void create_debugfs_files(struct mlx5_core_dev *dev)
 {
 	struct mlx5_cmd_debug *dbg = &dev->cmd.dbg;
-	int err = -ENOMEM;
-
-	if (!mlx5_debugfs_root)
-		return 0;
 
 	dbg->dbg_root = debugfs_create_dir("cmd", dev->priv.dbg_root);
-	if (!dbg->dbg_root)
-		return err;
 
-	dbg->dbg_in = debugfs_create_file("in", 0400, dbg->dbg_root,
-					  dev, &dfops);
-	if (!dbg->dbg_in)
-		goto err_dbg;
-
-	dbg->dbg_out = debugfs_create_file("out", 0200, dbg->dbg_root,
-					   dev, &dfops);
-	if (!dbg->dbg_out)
-		goto err_dbg;
-
-	dbg->dbg_outlen = debugfs_create_file("out_len", 0600, dbg->dbg_root,
-					      dev, &olfops);
-	if (!dbg->dbg_outlen)
-		goto err_dbg;
-
-	dbg->dbg_status = debugfs_create_u8("status", 0600, dbg->dbg_root,
-					    &dbg->status);
-	if (!dbg->dbg_status)
-		goto err_dbg;
-
-	dbg->dbg_run = debugfs_create_file("run", 0200, dbg->dbg_root, dev, &fops);
-	if (!dbg->dbg_run)
-		goto err_dbg;
+	debugfs_create_file("in", 0400, dbg->dbg_root, dev, &dfops);
+	debugfs_create_file("out", 0200, dbg->dbg_root, dev, &dfops);
+	debugfs_create_file("out_len", 0600, dbg->dbg_root, dev, &olfops);
+	debugfs_create_u8("status", 0600, dbg->dbg_root, &dbg->status);
+	debugfs_create_file("run", 0200, dbg->dbg_root, dev, &fops);
 
 	mlx5_cmdif_debugfs_init(dev);
-
-	return 0;
-
-err_dbg:
-	clean_debug_files(dev);
-	return err;
 }
 
 static void mlx5_cmd_change_mod(struct mlx5_core_dev *dev, int mode)
@@ -2007,16 +1999,9 @@ int mlx5_cmd_init(struct mlx5_core_dev *dev)
 		goto err_cache;
 	}
 
-	err = create_debugfs_files(dev);
-	if (err) {
-		err = -ENOMEM;
-		goto err_wq;
-	}
+	create_debugfs_files(dev);
 
 	return 0;
-
-err_wq:
-	destroy_workqueue(cmd->wq);
 
 err_cache:
 	destroy_msg_cache(dev);

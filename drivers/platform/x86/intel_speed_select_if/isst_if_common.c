@@ -29,6 +29,8 @@ static struct isst_if_cmd_cb punit_callbacks[ISST_IF_DEV_MAX];
 static int punit_msr_white_list[] = {
 	MSR_TURBO_RATIO_LIMIT,
 	MSR_CONFIG_TDP_CONTROL,
+	MSR_TURBO_RATIO_LIMIT1,
+	MSR_TURBO_RATIO_LIMIT2,
 };
 
 struct isst_valid_cmd_ranges {
@@ -48,6 +50,8 @@ static const struct isst_valid_cmd_ranges isst_valid_cmds[] = {
 	{0x7F, 0x00, 0x0B},
 	{0x7F, 0x10, 0x12},
 	{0x7F, 0x20, 0x23},
+	{0x94, 0x03, 0x03},
+	{0x95, 0x03, 0x03},
 };
 
 static const struct isst_cmd_set_req_type isst_cmd_set_reqs[] = {
@@ -57,6 +61,7 @@ static const struct isst_cmd_set_req_type isst_cmd_set_reqs[] = {
 	{0xD0, 0x03, 0x08},
 	{0x7F, 0x02, 0x00},
 	{0x7F, 0x08, 0x00},
+	{0x95, 0x03, 0x03},
 };
 
 struct isst_cmd {

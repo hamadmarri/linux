@@ -813,7 +813,7 @@ static void activate_amp_in(struct hda_codec *codec, struct nid_path *path,
 	}
 }
 
-/* sync power of each widget in the the given path */
+/* sync power of each widget in the given path */
 static hda_nid_t path_power_update(struct hda_codec *codec,
 				   struct nid_path *path,
 				   bool allow_powerdown)
@@ -1364,16 +1364,20 @@ static int try_assign_dacs(struct hda_codec *codec, int num_outs,
 		struct nid_path *path;
 		hda_nid_t pin = pins[i];
 
-		path = snd_hda_get_path_from_idx(codec, path_idx[i]);
-		if (path) {
-			badness += assign_out_path_ctls(codec, path);
-			continue;
+		if (!spec->obey_preferred_dacs) {
+			path = snd_hda_get_path_from_idx(codec, path_idx[i]);
+			if (path) {
+				badness += assign_out_path_ctls(codec, path);
+				continue;
+			}
 		}
 
 		dacs[i] = get_preferred_dac(codec, pin);
 		if (dacs[i]) {
 			if (is_dac_already_used(codec, dacs[i]))
 				badness += bad->shared_primary;
+		} else if (spec->obey_preferred_dacs) {
+			badness += BAD_NO_PRIMARY_DAC;
 		}
 
 		if (!dacs[i])
@@ -4042,6 +4046,11 @@ static void call_ledtrig_micmute(struct hda_codec *codec)
  *
  * Note that this fixup has to be called after other fixup that sets
  * cap_sync_hook.  Otherwise the chaining wouldn't work.
+ *
+ * @codec: the HDA codec
+ * @fix: fixup pointer
+ * @action: only supports HDA_FIXUP_ACT_PROBE value
+ *
  */
 void snd_hda_gen_fixup_micmute_led(struct hda_codec *codec,
 				   const struct hda_fixup *fix, int action)
@@ -4401,7 +4410,7 @@ EXPORT_SYMBOL_GPL(snd_hda_gen_fix_pin_power);
  */
 
 /* check each pin in the given array; returns true if any of them is plugged */
-static bool detect_jacks(struct hda_codec *codec, int num_pins, hda_nid_t *pins)
+static bool detect_jacks(struct hda_codec *codec, int num_pins, const hda_nid_t *pins)
 {
 	int i;
 	bool present = false;
@@ -4420,7 +4429,7 @@ static bool detect_jacks(struct hda_codec *codec, int num_pins, hda_nid_t *pins)
 }
 
 /* standard HP/line-out auto-mute helper */
-static void do_automute(struct hda_codec *codec, int num_pins, hda_nid_t *pins,
+static void do_automute(struct hda_codec *codec, int num_pins, const hda_nid_t *pins,
 			int *paths, bool mute)
 {
 	struct hda_gen_spec *spec = codec->spec;
@@ -6027,7 +6036,7 @@ int snd_hda_gen_init(struct hda_codec *codec)
 	/* call init functions of standard auto-mute helpers */
 	update_automute_all(codec);
 
-	regcache_sync(codec->core.regmap);
+	snd_hda_regmap_sync(codec);
 
 	if (spec->vmaster_mute.sw_kctl && spec->vmaster_mute.hook)
 		snd_hda_sync_vmaster_hook(&spec->vmaster_mute);

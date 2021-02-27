@@ -216,7 +216,6 @@ struct nfs_client *nfs4_alloc_client(const struct nfs_client_initdata *cl_init)
 	INIT_LIST_HEAD(&clp->cl_ds_clients);
 	rpc_init_wait_queue(&clp->cl_rpcwaitq, "NFS client");
 	clp->cl_state = 1 << NFS4CLNT_LEASE_EXPIRED;
-	clp->cl_minorversion = cl_init->minorversion;
 	clp->cl_mvops = nfs_v4_minor_ops[cl_init->minorversion];
 	clp->cl_mig_gen = 1;
 #if IS_ENABLED(CONFIG_NFS_V4_1)
@@ -505,7 +504,7 @@ static int nfs4_match_client(struct nfs_client  *pos,  struct nfs_client *new,
 	 * remaining fields in "pos", especially the client
 	 * ID and serverowner fields.  Wait for CREATE_SESSION
 	 * to finish. */
-	if (pos->cl_cons_state > NFS_CS_READY) {
+	if (pos->cl_cons_state == NFS_CS_SESSION_INITING) {
 		refcount_inc(&pos->cl_count);
 		spin_unlock(&nn->nfs_client_lock);
 
@@ -879,7 +878,7 @@ static int nfs4_set_client(struct nfs_server *server,
 	};
 	struct nfs_client *clp;
 
-	if (minorversion > 0 && proto == XPRT_TRANSPORT_TCP)
+	if (proto == XPRT_TRANSPORT_TCP)
 		cl_init.nconnect = nconnect;
 	if (server->flags & NFS_MOUNT_NORESVPORT)
 		set_bit(NFS_CS_NORESVPORT, &cl_init.init_flags);

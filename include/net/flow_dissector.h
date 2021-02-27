@@ -5,7 +5,10 @@
 #include <linux/types.h>
 #include <linux/in6.h>
 #include <linux/siphash.h>
+#include <linux/string.h>
 #include <uapi/linux/if_ether.h>
+
+struct sk_buff;
 
 /**
  * struct flow_dissector_key_control:
@@ -157,19 +160,16 @@ struct flow_dissector_key_ports {
 
 /**
  * flow_dissector_key_icmp:
- *	@ports: type and code of ICMP header
- *		icmp: ICMP type (high) and code (low)
  *		type: ICMP type
  *		code: ICMP code
+ *		id:   session identifier
  */
 struct flow_dissector_key_icmp {
-	union {
-		__be16 icmp;
-		struct {
-			u8 type;
-			u8 code;
-		};
+	struct {
+		u8 type;
+		u8 code;
 	};
+	u16 id;
 };
 
 /**
@@ -229,6 +229,7 @@ enum flow_dissector_key_id {
 	FLOW_DISSECTOR_KEY_IPV4_ADDRS, /* struct flow_dissector_key_ipv4_addrs */
 	FLOW_DISSECTOR_KEY_IPV6_ADDRS, /* struct flow_dissector_key_ipv6_addrs */
 	FLOW_DISSECTOR_KEY_PORTS, /* struct flow_dissector_key_ports */
+	FLOW_DISSECTOR_KEY_PORTS_RANGE, /* struct flow_dissector_key_ports */
 	FLOW_DISSECTOR_KEY_ICMP, /* struct flow_dissector_key_icmp */
 	FLOW_DISSECTOR_KEY_ETH_ADDRS, /* struct flow_dissector_key_eth_addrs */
 	FLOW_DISSECTOR_KEY_TIPC, /* struct flow_dissector_key_tipc */
@@ -283,6 +284,8 @@ struct flow_keys {
 	struct flow_dissector_key_vlan cvlan;
 	struct flow_dissector_key_keyid keyid;
 	struct flow_dissector_key_ports ports;
+	struct flow_dissector_key_icmp icmp;
+	/* 'addrs' must be the last member */
 	struct flow_dissector_key_addrs addrs;
 };
 
@@ -316,6 +319,9 @@ static inline bool flow_keys_have_l4(const struct flow_keys *keys)
 }
 
 u32 flow_hash_from_keys(struct flow_keys *keys);
+void skb_flow_get_icmp_tci(const struct sk_buff *skb,
+			   struct flow_dissector_key_icmp *key_icmp,
+			   void *data, int thoff, int hlen);
 
 static inline bool dissector_uses_key(const struct flow_dissector *flow_dissector,
 				      enum flow_dissector_key_id key_id)
@@ -336,5 +342,13 @@ struct bpf_flow_dissector {
 	void			*data;
 	void			*data_end;
 };
+
+static inline void
+flow_dissector_init_keys(struct flow_dissector_key_control *key_control,
+			 struct flow_dissector_key_basic *key_basic)
+{
+	memset(key_control, 0, sizeof(*key_control));
+	memset(key_basic, 0, sizeof(*key_basic));
+}
 
 #endif

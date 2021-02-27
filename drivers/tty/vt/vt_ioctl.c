@@ -223,7 +223,7 @@ int vt_waitactive(int n)
 
 
 static inline int 
-do_fontx_ioctl(int cmd, struct consolefontdesc __user *user_cfd, int perm, struct console_font_op *op)
+do_fontx_ioctl(struct vc_data *vc, int cmd, struct consolefontdesc __user *user_cfd, int perm, struct console_font_op *op)
 {
 	struct consolefontdesc cfdarg;
 	int i;
@@ -241,15 +241,16 @@ do_fontx_ioctl(int cmd, struct consolefontdesc __user *user_cfd, int perm, struc
 		op->height = cfdarg.charheight;
 		op->charcount = cfdarg.charcount;
 		op->data = cfdarg.chardata;
-		return con_font_op(vc_cons[fg_console].d, op);
-	case GIO_FONTX: {
+		return con_font_op(vc, op);
+
+	case GIO_FONTX:
 		op->op = KD_FONT_OP_GET;
 		op->flags = KD_FONT_FLAG_OLD;
 		op->width = 8;
 		op->height = cfdarg.charheight;
 		op->charcount = cfdarg.charcount;
 		op->data = cfdarg.chardata;
-		i = con_font_op(vc_cons[fg_console].d, op);
+		i = con_font_op(vc, op);
 		if (i)
 			return i;
 		cfdarg.charheight = op->height;
@@ -257,7 +258,6 @@ do_fontx_ioctl(int cmd, struct consolefontdesc __user *user_cfd, int perm, struc
 		if (copy_to_user(user_cfd, &cfdarg, sizeof(struct consolefontdesc)))
 			return -EFAULT;
 		return 0;
-		}
 	}
 	return -EINVAL;
 }
@@ -295,10 +295,8 @@ static int vt_disallocate(unsigned int vc_num)
 		vc = vc_deallocate(vc_num);
 	console_unlock();
 
-	if (vc && vc_num >= MIN_NR_CONSOLES) {
-		tty_port_destroy(&vc->port);
-		kfree(vc);
-	}
+	if (vc && vc_num >= MIN_NR_CONSOLES)
+		tty_port_put(&vc->port);
 
 	return ret;
 }
@@ -318,10 +316,8 @@ static void vt_disallocate_all(void)
 	console_unlock();
 
 	for (i = 1; i < MAX_NR_CONSOLES; i++) {
-		if (vc[i] && i >= MIN_NR_CONSOLES) {
-			tty_port_destroy(&vc[i]->port);
-			kfree(vc[i]);
-		}
+		if (vc[i] && i >= MIN_NR_CONSOLES)
+			tty_port_put(&vc[i]->port);
 	}
 }
 
@@ -335,21 +331,12 @@ int vt_ioctl(struct tty_struct *tty,
 {
 	struct vc_data *vc = tty->driver_data;
 	struct console_font_op op;	/* used in multiple places here */
-	unsigned int console;
+	unsigned int console = vc->vc_num;
 	unsigned char ucval;
 	unsigned int uival;
 	void __user *up = (void __user *)arg;
 	int i, perm;
 	int ret = 0;
-
-	console = vc->vc_num;
-
-
-	if (!vc_cons_allocated(console)) { 	/* impossible? */
-		ret = -ENOIOCTLCMD;
-		goto out;
-	}
-
 
 	/*
 	 * To have permissions to do most of the vt ioctls, we either have
@@ -876,15 +863,20 @@ int vt_ioctl(struct tty_struct *tty,
 			return -EINVAL;
 
 		for (i = 0; i < MAX_NR_CONSOLES; i++) {
+			struct vc_data *vcp;
+
 			if (!vc_cons[i].d)
 				continue;
 			console_lock();
-			if (v.v_vlin)
-				vc_cons[i].d->vc_scan_lines = v.v_vlin;
-			if (v.v_clin)
-				vc_cons[i].d->vc_font.height = v.v_clin;
-			vc_cons[i].d->vc_resize_user = 1;
-			vc_resize(vc_cons[i].d, v.v_cols, v.v_rows);
+			vcp = vc_cons[i].d;
+			if (vcp) {
+				if (v.v_vlin)
+					vcp->vc_scan_lines = v.v_vlin;
+				if (v.v_clin)
+					vcp->vc_font.height = v.v_clin;
+				vcp->vc_resize_user = 1;
+				vc_resize(vcp, v.v_cols, v.v_rows);
+			}
 			console_unlock();
 		}
 		break;
@@ -899,7 +891,7 @@ int vt_ioctl(struct tty_struct *tty,
 		op.height = 0;
 		op.charcount = 256;
 		op.data = up;
-		ret = con_font_op(vc_cons[fg_console].d, &op);
+		ret = con_font_op(vc, &op);
 		break;
 	}
 
@@ -910,7 +902,7 @@ int vt_ioctl(struct tty_struct *tty,
 		op.height = 32;
 		op.charcount = 256;
 		op.data = up;
-		ret = con_font_op(vc_cons[fg_console].d, &op);
+		ret = con_font_op(vc, &op);
 		break;
 	}
 
@@ -927,7 +919,7 @@ int vt_ioctl(struct tty_struct *tty,
 
 	case PIO_FONTX:
 	case GIO_FONTX:
-		ret = do_fontx_ioctl(cmd, up, perm, &op);
+		ret = do_fontx_ioctl(vc, cmd, up, perm, &op);
 		break;
 
 	case PIO_FONTRESET:
@@ -944,11 +936,11 @@ int vt_ioctl(struct tty_struct *tty,
 		{
 		op.op = KD_FONT_OP_SET_DEFAULT;
 		op.data = NULL;
-		ret = con_font_op(vc_cons[fg_console].d, &op);
+		ret = con_font_op(vc, &op);
 		if (ret)
 			break;
 		console_lock();
-		con_set_default_unimap(vc_cons[fg_console].d);
+		con_set_default_unimap(vc);
 		console_unlock();
 		break;
 		}
@@ -1075,8 +1067,9 @@ struct compat_consolefontdesc {
 };
 
 static inline int
-compat_fontx_ioctl(int cmd, struct compat_consolefontdesc __user *user_cfd,
-			 int perm, struct console_font_op *op)
+compat_fontx_ioctl(struct vc_data *vc, int cmd,
+		   struct compat_consolefontdesc __user *user_cfd,
+		   int perm, struct console_font_op *op)
 {
 	struct compat_consolefontdesc cfdarg;
 	int i;
@@ -1094,7 +1087,8 @@ compat_fontx_ioctl(int cmd, struct compat_consolefontdesc __user *user_cfd,
 		op->height = cfdarg.charheight;
 		op->charcount = cfdarg.charcount;
 		op->data = compat_ptr(cfdarg.chardata);
-		return con_font_op(vc_cons[fg_console].d, op);
+		return con_font_op(vc, op);
+
 	case GIO_FONTX:
 		op->op = KD_FONT_OP_GET;
 		op->flags = KD_FONT_FLAG_OLD;
@@ -1102,7 +1096,7 @@ compat_fontx_ioctl(int cmd, struct compat_consolefontdesc __user *user_cfd,
 		op->height = cfdarg.charheight;
 		op->charcount = cfdarg.charcount;
 		op->data = compat_ptr(cfdarg.chardata);
-		i = con_font_op(vc_cons[fg_console].d, op);
+		i = con_font_op(vc, op);
 		if (i)
 			return i;
 		cfdarg.charheight = op->height;
@@ -1175,13 +1169,8 @@ long vt_compat_ioctl(struct tty_struct *tty,
 {
 	struct vc_data *vc = tty->driver_data;
 	struct console_font_op op;	/* used in multiple places here */
-	unsigned int console = vc->vc_num;
 	void __user *up = compat_ptr(arg);
 	int perm;
-
-
-	if (!vc_cons_allocated(console)) 	/* impossible? */
-		return -ENOIOCTLCMD;
 
 	/*
 	 * To have permissions to do most of the vt ioctls, we either have
@@ -1197,7 +1186,7 @@ long vt_compat_ioctl(struct tty_struct *tty,
 	 */
 	case PIO_FONTX:
 	case GIO_FONTX:
-		return compat_fontx_ioctl(cmd, up, perm, &op);
+		return compat_fontx_ioctl(vc, cmd, up, perm, &op);
 
 	case KDFONTOP:
 		return compat_kdfontop_ioctl(up, perm, &op, vc);

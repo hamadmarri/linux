@@ -31,6 +31,7 @@
 #include <linux/kthread.h>
 #include <linux/crc32.h>
 #include <linux/ktime.h>
+#include <linux/security.h>
 
 #include "power.h"
 
@@ -226,6 +227,7 @@ struct hib_bio_batch {
 	atomic_t		count;
 	wait_queue_head_t	wait;
 	blk_status_t		error;
+	struct blk_plug		plug;
 };
 
 static void hib_init_batch(struct hib_bio_batch *hb)
@@ -233,6 +235,12 @@ static void hib_init_batch(struct hib_bio_batch *hb)
 	atomic_set(&hb->count, 0);
 	init_waitqueue_head(&hb->wait);
 	hb->error = BLK_STS_OK;
+	blk_start_plug(&hb->plug);
+}
+
+static void hib_finish_batch(struct hib_bio_batch *hb)
+{
+	blk_finish_plug(&hb->plug);
 }
 
 static void hib_end_io(struct bio *bio)
@@ -294,6 +302,10 @@ static int hib_submit_io(int op, int op_flags, pgoff_t page_off, void *addr,
 
 static blk_status_t hib_wait_io(struct hib_bio_batch *hb)
 {
+	/*
+	 * We are relying on the behavior of blk_plug that a thread with
+	 * a plug will flush the plug list before sleeping.
+	 */
 	wait_event(hb->wait, atomic_read(&hb->count) == 0);
 	return blk_status_to_errno(hb->error);
 }
@@ -489,10 +501,10 @@ static int swap_writer_finish(struct swap_map_handle *handle,
 		unsigned int flags, int error)
 {
 	if (!error) {
-		flush_swap_writer(handle);
 		pr_info("S");
 		error = mark_swapfiles(handle, flags);
 		pr_cont("|\n");
+		flush_swap_writer(handle);
 	}
 
 	if (error)
@@ -561,6 +573,7 @@ static int save_image(struct swap_map_handle *handle,
 		nr_pages++;
 	}
 	err2 = hib_wait_io(&hb);
+	hib_finish_batch(&hb);
 	stop = ktime_get();
 	if (!ret)
 		ret = err2;
@@ -854,6 +867,7 @@ out_finish:
 		pr_info("Image saving done\n");
 	swsusp_show_speed(start, stop, nr_to_write, "Wrote");
 out_clean:
+	hib_finish_batch(&hb);
 	if (crc) {
 		if (crc->thr)
 			kthread_stop(crc->thr);
@@ -1084,6 +1098,7 @@ static int load_image(struct swap_map_handle *handle,
 		nr_pages++;
 	}
 	err2 = hib_wait_io(&hb);
+	hib_finish_batch(&hb);
 	stop = ktime_get();
 	if (!ret)
 		ret = err2;
@@ -1092,6 +1107,11 @@ static int load_image(struct swap_map_handle *handle,
 		snapshot_write_finalize(snapshot);
 		if (!snapshot_image_loaded(snapshot))
 			ret = -ENODATA;
+		if (!ret)
+			ret = snapshot_image_verify();
+		snapshot_init_trampoline();
+		/* clean the hidden area in boot kernel */
+		clean_hidden_area();
 	}
 	swsusp_show_speed(start, stop, nr_to_read, "Read");
 	return ret;
@@ -1444,9 +1464,15 @@ out_finish:
 				}
 			}
 		}
+		if (!ret)
+			ret = snapshot_image_verify();
+		snapshot_init_trampoline();
+		/* clean the hidden area in boot kernel */
+		clean_hidden_area();
 	}
 	swsusp_show_speed(start, stop, nr_to_read, "Read");
 out_clean:
+	hib_finish_batch(&hb);
 	for (i = 0; i < ring_size; i++)
 		free_page((unsigned long)page[i]);
 	if (crc) {

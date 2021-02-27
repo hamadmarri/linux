@@ -965,7 +965,7 @@ _err_defer:
 static void soc_cleanup_component(struct snd_soc_component *component)
 {
 	snd_soc_component_set_jack(component, NULL, NULL);
-	list_del(&component->card_list);
+	list_del_init(&component->card_list);
 	snd_soc_dapm_free(snd_soc_component_get_dapm(component));
 	soc_cleanup_component_debugfs(component);
 	component->card = NULL;
@@ -1921,7 +1921,25 @@ match:
 			dai_link->platforms->name = component->name;
 
 			/* convert non BE into BE */
-			dai_link->no_pcm = 1;
+			if (!dai_link->no_pcm) {
+				dai_link->no_pcm = 1;
+
+				if (dai_link->dpcm_playback)
+					dev_warn(card->dev,
+						 "invalid configuration, dailink %s has flags no_pcm=0 and dpcm_playback=1\n",
+						 dai_link->name);
+				if (dai_link->dpcm_capture)
+					dev_warn(card->dev,
+						 "invalid configuration, dailink %s has flags no_pcm=0 and dpcm_capture=1\n",
+						 dai_link->name);
+
+				/* convert normal link into DPCM one */
+				if (!(dai_link->dpcm_playback ||
+				      dai_link->dpcm_capture)) {
+					dai_link->dpcm_playback = !dai_link->capture_only;
+					dai_link->dpcm_capture = !dai_link->playback_only;
+				}
+			}
 
 			/* override any BE fixups */
 			dai_link->be_hw_params_fixup =
@@ -2847,7 +2865,7 @@ static inline char *fmt_multiple_name(struct device *dev,
 }
 
 /**
- * snd_soc_unregister_dai - Unregister DAIs from the ASoC core
+ * snd_soc_unregister_dais - Unregister DAIs from the ASoC core
  *
  * @component: The component for which the DAIs should be unregistered
  */

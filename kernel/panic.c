@@ -368,6 +368,10 @@ const struct taint_flag taint_flags[TAINT_FLAGS_COUNT] = {
 	[ TAINT_LIVEPATCH ]		= { 'K', ' ', true },
 	[ TAINT_AUX ]			= { 'X', ' ', true },
 	[ TAINT_RANDSTRUCT ]		= { 'T', ' ', true },
+	[ TAINT_UNSAFE_HIBERNATE ]	= { 'H', ' ', false },
+#ifdef CONFIG_SUSE_KERNEL_SUPPORTED
+	[ TAINT_NO_SUPPORT ]		= { 'N', ' ', true },
+#endif
 };
 
 /**
@@ -391,6 +395,9 @@ const char *print_tainted(void)
 		s = buf + sprintf(buf, "Tainted: ");
 		for (i = 0; i < TAINT_FLAGS_COUNT; i++) {
 			const struct taint_flag *t = &taint_flags[i];
+
+			if (!t->c_true)
+				continue;
 			*s++ = test_bit(i, &tainted_mask) ?
 					t->c_true : t->c_false;
 		}
@@ -675,17 +682,6 @@ __visible void __stack_chk_fail(void)
 }
 EXPORT_SYMBOL(__stack_chk_fail);
 
-#endif
-
-#ifdef CONFIG_ARCH_HAS_REFCOUNT
-void refcount_error_report(struct pt_regs *regs, const char *err)
-{
-	WARN_RATELIMIT(1, "refcount_t %s at %pB in %s[%d], uid/euid: %u/%u\n",
-		err, (void *)instruction_pointer(regs),
-		current->comm, task_pid_nr(current),
-		from_kuid_munged(&init_user_ns, current_uid()),
-		from_kuid_munged(&init_user_ns, current_euid()));
-}
 #endif
 
 core_param(panic, panic_timeout, int, 0644);

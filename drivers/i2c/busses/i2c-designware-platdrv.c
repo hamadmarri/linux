@@ -346,8 +346,10 @@ static int dw_i2c_plat_probe(struct platform_device *pdev)
 
 	/* Optional interface clock */
 	dev->pclk = devm_clk_get_optional(&pdev->dev, "pclk");
-	if (IS_ERR(dev->pclk))
-		return PTR_ERR(dev->pclk);
+	if (IS_ERR(dev->pclk)) {
+		ret = PTR_ERR(dev->pclk);
+		goto exit_reset;
+	}
 
 	dev->clk = devm_clk_get(&pdev->dev, NULL);
 	if (!i2c_dw_prepare_clk(dev, true)) {
@@ -370,10 +372,16 @@ static int dw_i2c_plat_probe(struct platform_device *pdev)
 	adap->dev.of_node = pdev->dev.of_node;
 	adap->nr = -1;
 
-	dev_pm_set_driver_flags(&pdev->dev,
-				DPM_FLAG_SMART_PREPARE |
-				DPM_FLAG_SMART_SUSPEND |
-				DPM_FLAG_LEAVE_SUSPENDED);
+	if (dev->flags & ACCESS_NO_IRQ_SUSPEND) {
+		dev_pm_set_driver_flags(&pdev->dev,
+					DPM_FLAG_SMART_PREPARE |
+					DPM_FLAG_LEAVE_SUSPENDED);
+	} else {
+		dev_pm_set_driver_flags(&pdev->dev,
+					DPM_FLAG_SMART_PREPARE |
+					DPM_FLAG_SMART_SUSPEND |
+					DPM_FLAG_LEAVE_SUSPENDED);
+	}
 
 	/* The code below assumes runtime PM to be disabled. */
 	WARN_ON(pm_runtime_enabled(&pdev->dev));

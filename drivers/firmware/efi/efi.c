@@ -30,11 +30,13 @@
 #include <linux/acpi.h>
 #include <linux/ucs2_string.h>
 #include <linux/memblock.h>
+#include <linux/security.h>
 
 #include <asm/early_ioremap.h>
 
 struct efi __read_mostly efi = {
 	.mps			= EFI_INVALID_TABLE_ADDR,
+	.runtime_supported_mask = EFI_RT_SUPPORTED_ALL,
 	.acpi			= EFI_INVALID_TABLE_ADDR,
 	.acpi20			= EFI_INVALID_TABLE_ADDR,
 	.smbios			= EFI_INVALID_TABLE_ADDR,
@@ -57,24 +59,7 @@ struct efi __read_mostly efi = {
 };
 EXPORT_SYMBOL(efi);
 
-static unsigned long *efi_tables[] = {
-	&efi.mps,
-	&efi.acpi,
-	&efi.acpi20,
-	&efi.smbios,
-	&efi.smbios3,
-	&efi.sal_systab,
-	&efi.boot_info,
-	&efi.hcdp,
-	&efi.uga,
-	&efi.uv_systab,
-	&efi.fw_vendor,
-	&efi.runtime,
-	&efi.config_table,
-	&efi.esrt,
-	&efi.properties_table,
-	&efi.mem_attr_table,
-};
+static unsigned long __initdata rt_prop = EFI_INVALID_TABLE_ADDR;
 
 struct mm_struct efi_mm = {
 	.mm_rb			= RB_ROOT,
@@ -224,11 +209,13 @@ static struct efivar_operations generic_ops;
 static int generic_ops_register(void)
 {
 	generic_ops.get_variable = efi.get_variable;
-	generic_ops.set_variable = efi.set_variable;
-	generic_ops.set_variable_nonblocking = efi.set_variable_nonblocking;
 	generic_ops.get_next_variable = efi.get_next_variable;
 	generic_ops.query_variable_store = efi_query_variable_store;
 
+	if (efi_rt_services_supported(EFI_RT_SUPPORTED_SET_VARIABLE)) {
+		generic_ops.set_variable = efi.set_variable;
+		generic_ops.set_variable_nonblocking = efi.set_variable_nonblocking;
+	}
 	return efivars_register(&generic_efivars, &generic_ops, efi_kobj);
 }
 
@@ -242,6 +229,11 @@ static void generic_ops_unregister(void)
 static char efivar_ssdt[EFIVAR_SSDT_NAME_MAX] __initdata;
 static int __init efivar_ssdt_setup(char *str)
 {
+	int ret = security_locked_down(LOCKDOWN_ACPI_TABLES);
+
+	if (ret)
+		return ret;
+
 	if (strlen(str) < sizeof(efivar_ssdt))
 		memcpy(efivar_ssdt, str, strlen(str));
 	else
@@ -341,34 +333,46 @@ static int __init efisubsys_init(void)
 {
 	int error;
 
+	if (!efi_enabled(EFI_RUNTIME_SERVICES))
+		efi.runtime_supported_mask = 0;
+
 	if (!efi_enabled(EFI_BOOT))
 		return 0;
 
-	/*
-	 * Since we process only one efi_runtime_service() at a time, an
-	 * ordered workqueue (which creates only one execution context)
-	 * should suffice all our needs.
-	 */
-	efi_rts_wq = alloc_ordered_workqueue("efi_rts_wq", 0);
-	if (!efi_rts_wq) {
-		pr_err("Creating efi_rts_wq failed, EFI runtime services disabled.\n");
-		clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
-		return 0;
+	if (efi.runtime_supported_mask) {
+		/*
+		 * Since we process only one efi_runtime_service() at a time, an
+		 * ordered workqueue (which creates only one execution context)
+		 * should suffice for all our needs.
+		 */
+		efi_rts_wq = alloc_ordered_workqueue("efi_rts_wq", 0);
+		if (!efi_rts_wq) {
+			pr_err("Creating efi_rts_wq failed, EFI runtime services disabled.\n");
+			clear_bit(EFI_RUNTIME_SERVICES, &efi.flags);
+			efi.runtime_supported_mask = 0;
+			return 0;
+		}
 	}
+
+	if (efi_rt_services_supported(EFI_RT_SUPPORTED_TIME_SERVICES))
+		platform_device_register_simple("rtc-efi", 0, NULL, 0);
 
 	/* We register the efi directory at /sys/firmware/efi */
 	efi_kobj = kobject_create_and_add("efi", firmware_kobj);
 	if (!efi_kobj) {
 		pr_err("efi: Firmware registration failed.\n");
+		destroy_workqueue(efi_rts_wq);
 		return -ENOMEM;
 	}
 
-	error = generic_ops_register();
-	if (error)
-		goto err_put;
-
-	if (efi_enabled(EFI_RUNTIME_SERVICES))
+	if (efi_rt_services_supported(EFI_RT_SUPPORTED_GET_VARIABLE |
+				      EFI_RT_SUPPORTED_GET_NEXT_VARIABLE_NAME)) {
+		error = generic_ops_register();
+		if (error)
+			goto err_put;
 		efivar_ssdt_load();
+		platform_device_register_simple("efivars", 0, NULL, 0);
+	}
 
 	error = sysfs_create_group(efi_kobj, &efi_subsys_attr_group);
 	if (error) {
@@ -378,6 +382,10 @@ static int __init efisubsys_init(void)
 	}
 
 	error = efi_runtime_map_init(efi_kobj);
+	if (error)
+		goto err_remove_group;
+
+	error = efi_skey_sysfs_init(efi_kobj);
 	if (error)
 		goto err_remove_group;
 
@@ -393,9 +401,12 @@ static int __init efisubsys_init(void)
 err_remove_group:
 	sysfs_remove_group(efi_kobj, &efi_subsys_attr_group);
 err_unregister:
-	generic_ops_unregister();
+	if (efi_rt_services_supported(EFI_RT_SUPPORTED_GET_VARIABLE |
+				      EFI_RT_SUPPORTED_GET_NEXT_VARIABLE_NAME))
+		generic_ops_unregister();
 err_put:
 	kobject_put(efi_kobj);
+	destroy_workqueue(efi_rts_wq);
 	return error;
 }
 
@@ -490,6 +501,10 @@ static __initdata efi_config_table_type_t common_tables[] = {
 	{LINUX_EFI_TPM_EVENT_LOG_GUID, "TPMEventLog", &efi.tpm_log},
 	{LINUX_EFI_TPM_FINAL_LOG_GUID, "TPMFinalLog", &efi.tpm_final_log},
 	{LINUX_EFI_MEMRESERVE_TABLE_GUID, "MEMRESERVE", &efi.mem_reserve},
+	{EFI_RT_PROPERTIES_TABLE_GUID, "RTPROP", &rt_prop},
+#ifdef CONFIG_EFI_RCI2_TABLE
+	{DELLEMC_EFI_RCI2_TABLE_GUID, NULL, &rci2_table_phys},
+#endif
 	{NULL_GUID, NULL, NULL},
 };
 
@@ -557,7 +572,7 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 
 		seed = early_memremap(efi.rng_seed, sizeof(*seed));
 		if (seed != NULL) {
-			size = seed->size;
+			size = READ_ONCE(seed->size);
 			early_memunmap(seed, sizeof(*seed));
 		} else {
 			pr_err("Could not map UEFI random seed!\n");
@@ -567,7 +582,7 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 					      sizeof(*seed) + size);
 			if (seed != NULL) {
 				pr_notice("seeding entropy pool\n");
-				add_device_randomness(seed->bits, seed->size);
+				add_bootloader_randomness(seed->bits, size);
 				early_memunmap(seed, sizeof(*seed) + size);
 			} else {
 				pr_err("Could not map UEFI random seed!\n");
@@ -575,7 +590,7 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 		}
 	}
 
-	if (efi_enabled(EFI_MEMMAP))
+	if (!IS_ENABLED(CONFIG_X86_32) && efi_enabled(EFI_MEMMAP))
 		efi_memattr_init();
 
 	efi_tpm_eventlog_init();
@@ -632,6 +647,16 @@ int __init efi_config_parse_tables(void *config_tables, int count, int sz,
 		}
 	}
 
+	if (rt_prop != EFI_INVALID_TABLE_ADDR) {
+		efi_rt_properties_table_t *tbl;
+
+		tbl = early_memremap(rt_prop, sizeof(*tbl));
+		if (tbl) {
+			efi.runtime_supported_mask &= tbl->runtime_services_supported;
+			early_memunmap(tbl, sizeof(*tbl));
+		}
+	}
+
 	return 0;
 }
 
@@ -664,20 +689,6 @@ int __init efi_config_init(efi_config_table_type_t *arch_tables)
 	early_memunmap(config_tables, efi.systab->nr_tables * sz);
 	return ret;
 }
-
-#ifdef CONFIG_EFI_VARS_MODULE
-static int __init efi_load_efivars(void)
-{
-	struct platform_device *pdev;
-
-	if (!efi_enabled(EFI_RUNTIME_SERVICES))
-		return 0;
-
-	pdev = platform_device_register_simple("efivars", 0, NULL, 0);
-	return PTR_ERR_OR_ZERO(pdev);
-}
-device_initcall(efi_load_efivars);
-#endif
 
 #ifdef CONFIG_EFI_PARAMS_FROM_FDT
 
@@ -967,19 +978,37 @@ int efi_status_to_err(efi_status_t status)
 	return err;
 }
 
-bool efi_is_table_address(unsigned long phys_addr)
+#define EFI_STATUS_STR(_status) \
+	EFI_##_status : return "EFI_" __stringify(_status)
+
+const char *efi_status_to_str(efi_status_t status)
 {
-	unsigned int i;
+	switch (status) {
+	case EFI_STATUS_STR(SUCCESS);
+	case EFI_STATUS_STR(LOAD_ERROR);
+	case EFI_STATUS_STR(INVALID_PARAMETER);
+	case EFI_STATUS_STR(UNSUPPORTED);
+	case EFI_STATUS_STR(BAD_BUFFER_SIZE);
+	case EFI_STATUS_STR(BUFFER_TOO_SMALL);
+	case EFI_STATUS_STR(NOT_READY);
+	case EFI_STATUS_STR(DEVICE_ERROR);
+	case EFI_STATUS_STR(WRITE_PROTECTED);
+	case EFI_STATUS_STR(OUT_OF_RESOURCES);
+	case EFI_STATUS_STR(NOT_FOUND);
+	case EFI_STATUS_STR(ABORTED);
+	case EFI_STATUS_STR(SECURITY_VIOLATION);
+	}
+	/*
+	 * There are two possibilities for this message to be exposed:
+	 * - Caller feeds a unknown status code from firmware.
+	 * - A new status code be defined in efi.h but we forgot to update
+	 *   this function.
+	 */
+	pr_warn("Unknown efi status: 0x%lx\n", status);
 
-	if (phys_addr == EFI_INVALID_TABLE_ADDR)
-		return false;
-
-	for (i = 0; i < ARRAY_SIZE(efi_tables); i++)
-		if (*(efi_tables[i]) == phys_addr)
-			return true;
-
-	return false;
+	return "Unknown efi status";
 }
+EXPORT_SYMBOL(efi_status_to_str);
 
 static DEFINE_SPINLOCK(efi_mem_reserve_persistent_lock);
 static struct linux_efi_memreserve *efi_memreserve_root __ro_after_init;
@@ -995,6 +1024,24 @@ static int __init efi_memreserve_map_root(void)
 	if (WARN_ON_ONCE(!efi_memreserve_root))
 		return -ENOMEM;
 	return 0;
+}
+
+static int efi_mem_reserve_iomem(phys_addr_t addr, u64 size)
+{
+	struct resource *res, *parent;
+
+	res = kzalloc(sizeof(struct resource), GFP_ATOMIC);
+	if (!res)
+		return -ENOMEM;
+
+	res->name	= "reserved";
+	res->flags	= IORESOURCE_MEM;
+	res->start	= addr;
+	res->end	= addr + size - 1;
+
+	/* we expect a conflict with a 'System RAM' region */
+	parent = request_resource_conflict(&iomem_resource, res);
+	return parent ? request_resource(parent, res) : 0;
 }
 
 int __ref efi_mem_reserve_persistent(phys_addr_t addr, u64 size)
@@ -1021,7 +1068,7 @@ int __ref efi_mem_reserve_persistent(phys_addr_t addr, u64 size)
 			rsv->entry[index].size = size;
 
 			memunmap(rsv);
-			return 0;
+			return efi_mem_reserve_iomem(addr, size);
 		}
 		memunmap(rsv);
 	}
@@ -1030,6 +1077,12 @@ int __ref efi_mem_reserve_persistent(phys_addr_t addr, u64 size)
 	rsv = (struct linux_efi_memreserve *)__get_free_page(GFP_ATOMIC);
 	if (!rsv)
 		return -ENOMEM;
+
+	rc = efi_mem_reserve_iomem(__pa(rsv), SZ_4K);
+	if (rc) {
+		free_page((unsigned long)rsv);
+		return rc;
+	}
 
 	/*
 	 * The memremap() call above assumes that a linux_efi_memreserve entry
@@ -1047,7 +1100,7 @@ int __ref efi_mem_reserve_persistent(phys_addr_t addr, u64 size)
 	efi_memreserve_root->next = __pa(rsv);
 	spin_unlock(&efi_mem_reserve_persistent_lock);
 
-	return 0;
+	return efi_mem_reserve_iomem(addr, size);
 }
 
 static int __init efi_memreserve_root_init(void)

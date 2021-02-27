@@ -2163,10 +2163,13 @@ static void b43_release_firmware(struct b43_wldev *dev)
 static void b43_print_fw_helptext(struct b43_wl *wl, bool error)
 {
 	const char text[] =
-		"You must go to " \
-		"http://wireless.kernel.org/en/users/Drivers/b43#devicefirmware " \
-		"and download the correct firmware for this driver version. " \
-		"Please carefully read all instructions on this website.\n";
+		"Please open a terminal and enter the command " \
+		"\"sudo /usr/sbin/install_bcm43xx_firmware\" to download " \
+		"the correct firmware for this driver version. " \
+		"For an off-line installation, go to " \
+		"http://en.opensuse.org/HCL/Network_Adapters_(Wireless)/" \
+		"Broadcom_BCM43xx and follow the instructions in the " \
+		"\"Installing firmware from RPM packages\" section.\n";
 
 	if (error)
 		b43err(wl, text);
@@ -5569,7 +5572,7 @@ static struct b43_wl *b43_wireless_init(struct b43_bus_dev *dev)
 	/* fill hw info */
 	ieee80211_hw_set(hw, RX_INCLUDES_FCS);
 	ieee80211_hw_set(hw, SIGNAL_DBM);
-
+	ieee80211_hw_set(hw, MFP_CAPABLE);
 	hw->wiphy->interface_modes =
 		BIT(NL80211_IFTYPE_AP) |
 		BIT(NL80211_IFTYPE_MESH_POINT) |

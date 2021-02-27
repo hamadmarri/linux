@@ -140,6 +140,7 @@ EXPORT_SYMBOL_GPL(dm_bio_get_target_bio_nr);
 #define DMF_NOFLUSH_SUSPENDING 5
 #define DMF_DEFERRED_REMOVE 6
 #define DMF_SUSPENDED_INTERNALLY 7
+#define DMF_POST_SUSPENDING 8
 
 #define DM_NUMA_NODE NUMA_NO_NODE
 static int dm_numa_node = DM_NUMA_NODE;
@@ -329,16 +330,25 @@ int dm_deleting_md(struct mapped_device *md)
 static int dm_blk_open(struct block_device *bdev, fmode_t mode)
 {
 	struct mapped_device *md;
+	int retval = 0;
 
 	spin_lock(&_minor_lock);
 
 	md = bdev->bd_disk->private_data;
-	if (!md)
+	if (!md) {
+		retval = -ENXIO;
 		goto out;
+	}
 
 	if (test_bit(DMF_FREEING, &md->flags) ||
 	    dm_deleting_md(md)) {
 		md = NULL;
+		retval = -ENXIO;
+		goto out;
+	}
+	if (get_disk_ro(md->disk) && (mode & FMODE_WRITE)) {
+		md = NULL;
+		retval = -EROFS;
 		goto out;
 	}
 
@@ -347,7 +357,7 @@ static int dm_blk_open(struct block_device *bdev, fmode_t mode)
 out:
 	spin_unlock(&_minor_lock);
 
-	return md ? 0 : -ENXIO;
+	return retval;
 }
 
 static void dm_blk_close(struct gendisk *disk, fmode_t mode)
@@ -440,14 +450,48 @@ static int dm_blk_getgeo(struct block_device *bdev, struct hd_geometry *geo)
 	return dm_get_geometry(md, geo);
 }
 
-static int dm_blk_report_zones(struct gendisk *disk, sector_t sector,
-			       struct blk_zone *zones, unsigned int *nr_zones)
-{
 #ifdef CONFIG_BLK_DEV_ZONED
+int dm_report_zones_cb(struct blk_zone *zone, unsigned int idx, void *data)
+{
+	struct dm_report_zones_args *args = data;
+	sector_t sector_diff = args->tgt->begin - args->start;
+
+	/*
+	 * Ignore zones beyond the target range.
+	 */
+	if (zone->start >= args->start + args->tgt->len)
+		return 0;
+
+	/*
+	 * Remap the start sector and write pointer position of the zone
+	 * to match its position in the target range.
+	 */
+	zone->start += sector_diff;
+	if (zone->type != BLK_ZONE_TYPE_CONVENTIONAL) {
+		if (zone->cond == BLK_ZONE_COND_FULL)
+			zone->wp = zone->start + zone->len;
+		else if (zone->cond == BLK_ZONE_COND_EMPTY)
+			zone->wp = zone->start;
+		else
+			zone->wp += sector_diff;
+	}
+
+	args->next_sector = zone->start + zone->len;
+	return args->orig_cb(zone, args->zone_idx++, args->orig_data);
+}
+EXPORT_SYMBOL_GPL(dm_report_zones_cb);
+
+static int dm_blk_report_zones(struct gendisk *disk, sector_t sector,
+		unsigned int nr_zones, report_zones_cb cb, void *data)
+{
 	struct mapped_device *md = disk->private_data;
-	struct dm_target *tgt;
 	struct dm_table *map;
 	int srcu_idx, ret;
+	struct dm_report_zones_args args = {
+		.next_sector = sector,
+		.orig_data = data,
+		.orig_cb = cb,
+	};
 
 	if (dm_suspended_md(md))
 		return -EAGAIN;
@@ -456,38 +500,31 @@ static int dm_blk_report_zones(struct gendisk *disk, sector_t sector,
 	if (!map)
 		return -EIO;
 
-	tgt = dm_table_find_target(map, sector);
-	if (!dm_target_is_valid(tgt)) {
-		ret = -EIO;
-		goto out;
-	}
+	do {
+		struct dm_target *tgt;
 
-	/*
-	 * If we are executing this, we already know that the block device
-	 * is a zoned device and so each target should have support for that
-	 * type of drive. A missing report_zones method means that the target
-	 * driver has a problem.
-	 */
-	if (WARN_ON(!tgt->type->report_zones)) {
-		ret = -EIO;
-		goto out;
-	}
+		tgt = dm_table_find_target(map, args.next_sector);
+		if (WARN_ON_ONCE(!tgt->type->report_zones)) {
+			ret = -EIO;
+			goto out;
+		}
 
-	/*
-	 * blkdev_report_zones() will loop and call this again to cover all the
-	 * zones of the target, eventually moving on to the next target.
-	 * So there is no need to loop here trying to fill the entire array
-	 * of zones.
-	 */
-	ret = tgt->type->report_zones(tgt, sector, zones, nr_zones);
+		args.tgt = tgt;
+		ret = tgt->type->report_zones(tgt, &args,
+					      nr_zones - args.zone_idx);
+		if (ret < 0)
+			goto out;
+	} while (args.zone_idx < nr_zones &&
+		 args.next_sector < get_capacity(disk));
 
+	ret = args.zone_idx;
 out:
 	dm_put_live_table(md, srcu_idx);
 	return ret;
-#else
-	return -ENOTSUPP;
-#endif
 }
+#else
+#define dm_blk_report_zones		NULL
+#endif /* CONFIG_BLK_DEV_ZONED */
 
 static int dm_prepare_ioctl(struct mapped_device *md, int *srcu_idx,
 			    struct block_device **bdev)
@@ -624,28 +661,6 @@ static void free_tio(struct dm_target_io *tio)
 	if (tio->inside_dm_io)
 		return;
 	bio_put(&tio->clone);
-}
-
-static bool md_in_flight_bios(struct mapped_device *md)
-{
-	int cpu;
-	struct hd_struct *part = &dm_disk(md)->part0;
-	long sum = 0;
-
-	for_each_possible_cpu(cpu) {
-		sum += part_stat_local_read_cpu(part, in_flight[0], cpu);
-		sum += part_stat_local_read_cpu(part, in_flight[1], cpu);
-	}
-
-	return sum != 0;
-}
-
-static bool md_in_flight(struct mapped_device *md)
-{
-	if (queue_is_mq(md->queue))
-		return blk_mq_queue_inflight(md->queue);
-	else
-		return md_in_flight_bios(md);
 }
 
 static void start_io_acct(struct dm_io *io)
@@ -808,7 +823,12 @@ int dm_get_table_device(struct mapped_device *md, dev_t dev, fmode_t mode,
 		td->dm_dev.mode = mode;
 		td->dm_dev.bdev = NULL;
 
-		if ((r = open_table_device(td, dev, md))) {
+		r = open_table_device(td, dev, md);
+		if (r == -EROFS) {
+			td->dm_dev.mode &= ~FMODE_WRITE;
+			r = open_table_device(td, dev, md);
+		}
+		if (r) {
 			mutex_unlock(&md->table_devices_lock);
 			kfree(td);
 			return r;
@@ -1072,7 +1092,7 @@ static struct dm_target *dm_dax_get_live_target(struct mapped_device *md,
 		return NULL;
 
 	ti = dm_table_find_target(map, sector);
-	if (!dm_target_is_valid(ti))
+	if (!ti)
 		return NULL;
 
 	return ti;
@@ -1110,15 +1130,16 @@ static bool dm_dax_supported(struct dax_device *dax_dev, struct block_device *bd
 {
 	struct mapped_device *md = dax_get_private(dax_dev);
 	struct dm_table *map;
+	bool ret = false;
 	int srcu_idx;
-	bool ret;
 
 	map = dm_get_live_table(md, &srcu_idx);
 	if (!map)
-		return false;
+		goto out;
 
 	ret = dm_table_supports_dax(map, device_supports_dax, &blocksize);
 
+out:
 	dm_put_live_table(md, srcu_idx);
 
 	return ret;
@@ -1211,54 +1232,6 @@ void dm_accept_partial_bio(struct bio *bio, unsigned n_sectors)
 	bio->bi_iter.bi_size = n_sectors << SECTOR_SHIFT;
 }
 EXPORT_SYMBOL_GPL(dm_accept_partial_bio);
-
-/*
- * The zone descriptors obtained with a zone report indicate
- * zone positions within the underlying device of the target. The zone
- * descriptors must be remapped to match their position within the dm device.
- * The caller target should obtain the zones information using
- * blkdev_report_zones() to ensure that remapping for partition offset is
- * already handled.
- */
-void dm_remap_zone_report(struct dm_target *ti, sector_t start,
-			  struct blk_zone *zones, unsigned int *nr_zones)
-{
-#ifdef CONFIG_BLK_DEV_ZONED
-	struct blk_zone *zone;
-	unsigned int nrz = *nr_zones;
-	int i;
-
-	/*
-	 * Remap the start sector and write pointer position of the zones in
-	 * the array. Since we may have obtained from the target underlying
-	 * device more zones that the target size, also adjust the number
-	 * of zones.
-	 */
-	for (i = 0; i < nrz; i++) {
-		zone = zones + i;
-		if (zone->start >= start + ti->len) {
-			memset(zone, 0, sizeof(struct blk_zone) * (nrz - i));
-			break;
-		}
-
-		zone->start = zone->start + ti->begin - start;
-		if (zone->type == BLK_ZONE_TYPE_CONVENTIONAL)
-			continue;
-
-		if (zone->cond == BLK_ZONE_COND_FULL)
-			zone->wp = zone->start + zone->len;
-		else if (zone->cond == BLK_ZONE_COND_EMPTY)
-			zone->wp = zone->start;
-		else
-			zone->wp = zone->wp + ti->begin - start;
-	}
-
-	*nr_zones = i;
-#else /* !CONFIG_BLK_DEV_ZONED */
-	*nr_zones = 0;
-#endif
-}
-EXPORT_SYMBOL_GPL(dm_remap_zone_report);
 
 static blk_qc_t __map_bio(struct dm_target_io *tio)
 {
@@ -1572,7 +1545,7 @@ static int __split_and_process_non_flush(struct clone_info *ci)
 	int r;
 
 	ti = dm_table_find_target(ci->map, ci->sector);
-	if (!dm_target_is_valid(ti))
+	if (!ti)
 		return -EIO;
 
 	if (__process_abnormal_io(ci, ti, &r))
@@ -1748,7 +1721,7 @@ static blk_qc_t dm_process_bio(struct mapped_device *md,
 
 	if (!ti) {
 		ti = dm_table_find_target(map, bio->bi_iter.bi_sector);
-		if (unlikely(!ti || !dm_target_is_valid(ti))) {
+		if (unlikely(!ti)) {
 			bio_io_error(bio);
 			return ret;
 		}
@@ -1760,8 +1733,9 @@ static blk_qc_t dm_process_bio(struct mapped_device *md,
 	 * won't be imposed.
 	 */
 	if (current->bio_list) {
-		blk_queue_split(md->queue, &bio);
-		if (!is_abnormal_io(bio))
+		if (is_abnormal_io(bio))
+			blk_queue_split(md->queue, &bio);
+		else
 			dm_queue_split(md, ti, &bio);
 	}
 
@@ -1809,7 +1783,8 @@ static int dm_any_congested(void *congested_data, int bdi_bits)
 			 * With request-based DM we only need to check the
 			 * top-level queue for congestion.
 			 */
-			r = md->queue->backing_dev_info->wb.state & bdi_bits;
+			struct backing_dev_info *bdi = md->queue->backing_dev_info;
+			r = bdi->wb.congested->state & bdi_bits;
 		} else {
 			map = dm_get_live_table_fast(md);
 			if (map)
@@ -1874,14 +1849,6 @@ static const struct block_device_operations dm_blk_dops;
 static const struct dax_operations dm_dax_ops;
 
 static void dm_wq_work(struct work_struct *work);
-
-static void dm_init_normal_md_queue(struct mapped_device *md)
-{
-	/*
-	 * Initialize aspects of queue that aren't relevant for blk-mq
-	 */
-	md->queue->backing_dev_info->congested_fn = dm_any_congested;
-}
 
 static void cleanup_mapped_device(struct mapped_device *md)
 {
@@ -1970,7 +1937,12 @@ static struct mapped_device *alloc_dev(int minor)
 	if (!md->queue)
 		goto bad;
 	md->queue->queuedata = md;
-	md->queue->backing_dev_info->congested_data = md;
+	/*
+	 * default to bio-based required ->make_request_fn until DM
+	 * table is loaded and md->type established. If request-based
+	 * table is loaded: blk-mq will override accordingly.
+	 */
+	blk_queue_make_request(md->queue, dm_make_request);
 
 	md->disk = alloc_disk_node(1, md->numa_node_id);
 	if (!md->disk)
@@ -2177,6 +2149,10 @@ static struct dm_table *__bind(struct mapped_device *md, struct dm_table *t,
 	md->immutable_target_type = dm_table_get_immutable_target_type(t);
 
 	dm_table_set_restrictions(t, q, limits);
+	if (!(dm_table_get_mode(t) & FMODE_WRITE))
+		set_disk_ro(md->disk, 1);
+	else
+		set_disk_ro(md->disk, 0);
 	if (old_map)
 		dm_sync_table(md);
 
@@ -2264,6 +2240,12 @@ struct queue_limits *dm_get_queue_limits(struct mapped_device *md)
 }
 EXPORT_SYMBOL_GPL(dm_get_queue_limits);
 
+static void dm_init_congested_fn(struct mapped_device *md)
+{
+	md->queue->backing_dev_info->congested_data = md;
+	md->queue->backing_dev_info->congested_fn = dm_any_congested;
+}
+
 /*
  * Setup the DM device's queue based on md's type
  */
@@ -2280,12 +2262,12 @@ int dm_setup_md_queue(struct mapped_device *md, struct dm_table *t)
 			DMERR("Cannot initialize queue for request-based dm-mq mapped device");
 			return r;
 		}
+		dm_init_congested_fn(md);
 		break;
 	case DM_TYPE_BIO_BASED:
 	case DM_TYPE_DAX_BIO_BASED:
 	case DM_TYPE_NVME_BIO_BASED:
-		dm_init_normal_md_queue(md);
-		blk_queue_make_request(md->queue, dm_make_request);
+		dm_init_congested_fn(md);
 		break;
 	case DM_TYPE_NONE:
 		WARN_ON_ONCE(true);
@@ -2384,6 +2366,8 @@ static void __dm_destroy(struct mapped_device *md, bool wait)
 	map = dm_get_live_table(md, &srcu_idx);
 	if (!dm_suspended_md(md)) {
 		dm_table_presuspend_targets(map);
+		set_bit(DMF_SUSPENDED, &md->flags);
+		set_bit(DMF_POST_SUSPENDING, &md->flags);
 		dm_table_postsuspend_targets(map);
 	}
 	/* dm_put_live_table must be before msleep, otherwise deadlock is possible */
@@ -2424,15 +2408,29 @@ void dm_put(struct mapped_device *md)
 }
 EXPORT_SYMBOL_GPL(dm_put);
 
-static int dm_wait_for_completion(struct mapped_device *md, long task_state)
+static bool md_in_flight_bios(struct mapped_device *md)
+{
+	int cpu;
+	struct hd_struct *part = &dm_disk(md)->part0;
+	long sum = 0;
+
+	for_each_possible_cpu(cpu) {
+		sum += part_stat_local_read_cpu(part, in_flight[0], cpu);
+		sum += part_stat_local_read_cpu(part, in_flight[1], cpu);
+	}
+
+	return sum != 0;
+}
+
+static int dm_wait_for_bios_completion(struct mapped_device *md, long task_state)
 {
 	int r = 0;
 	DEFINE_WAIT(wait);
 
-	while (1) {
+	while (true) {
 		prepare_to_wait(&md->wait, &wait, task_state);
 
-		if (!md_in_flight(md))
+		if (!md_in_flight_bios(md))
 			break;
 
 		if (signal_pending_state(task_state, current)) {
@@ -2443,6 +2441,28 @@ static int dm_wait_for_completion(struct mapped_device *md, long task_state)
 		io_schedule();
 	}
 	finish_wait(&md->wait, &wait);
+
+	return r;
+}
+
+static int dm_wait_for_completion(struct mapped_device *md, long task_state)
+{
+	int r = 0;
+
+	if (!queue_is_mq(md->queue))
+		return dm_wait_for_bios_completion(md, task_state);
+
+	while (true) {
+		if (!blk_mq_queue_inflight(md->queue))
+			break;
+
+		if (signal_pending_state(task_state, current)) {
+			r = -EINTR;
+			break;
+		}
+
+		msleep(5);
+	}
 
 	return r;
 }
@@ -2706,7 +2726,9 @@ retry:
 	if (r)
 		goto out_unlock;
 
+	set_bit(DMF_POST_SUSPENDING, &md->flags);
 	dm_table_postsuspend_targets(map);
+	clear_bit(DMF_POST_SUSPENDING, &md->flags);
 
 out_unlock:
 	mutex_unlock(&md->suspend_lock);
@@ -2803,7 +2825,9 @@ static void __dm_internal_suspend(struct mapped_device *md, unsigned suspend_fla
 	(void) __dm_suspend(md, map, suspend_flags, TASK_UNINTERRUPTIBLE,
 			    DMF_SUSPENDED_INTERNALLY);
 
+	set_bit(DMF_POST_SUSPENDING, &md->flags);
 	dm_table_postsuspend_targets(map);
+	clear_bit(DMF_POST_SUSPENDING, &md->flags);
 }
 
 static void __dm_internal_resume(struct mapped_device *md)
@@ -2956,6 +2980,11 @@ int dm_suspended_md(struct mapped_device *md)
 	return test_bit(DMF_SUSPENDED, &md->flags);
 }
 
+static int dm_post_suspending_md(struct mapped_device *md)
+{
+	return test_bit(DMF_POST_SUSPENDING, &md->flags);
+}
+
 int dm_suspended_internally_md(struct mapped_device *md)
 {
 	return test_bit(DMF_SUSPENDED_INTERNALLY, &md->flags);
@@ -2971,6 +3000,12 @@ int dm_suspended(struct dm_target *ti)
 	return dm_suspended_md(dm_table_get_md(ti->table));
 }
 EXPORT_SYMBOL_GPL(dm_suspended);
+
+int dm_post_suspending(struct dm_target *ti)
+{
+	return dm_post_suspending_md(dm_table_get_md(ti->table));
+}
+EXPORT_SYMBOL_GPL(dm_post_suspending);
 
 int dm_noflush_suspending(struct dm_target *ti)
 {

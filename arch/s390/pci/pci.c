@@ -423,7 +423,7 @@ static void zpci_map_resources(struct pci_dev *pdev)
 
 		if (zpci_use_mio(zdev))
 			pdev->resource[i].start =
-				(resource_size_t __force) zdev->bars[i].mio_wb;
+				(resource_size_t __force) zdev->bars[i].mio_wt;
 		else
 			pdev->resource[i].start = (resource_size_t __force)
 				pci_iomap_range_fh(pdev, i, 0, 0);
@@ -530,7 +530,7 @@ static int zpci_setup_bus_resources(struct zpci_dev *zdev,
 			flags |= IORESOURCE_MEM_64;
 
 		if (zpci_use_mio(zdev))
-			addr = (unsigned long) zdev->bars[i].mio_wb;
+			addr = (unsigned long) zdev->bars[i].mio_wt;
 		else
 			addr = ZPCI_ADDR(entry);
 		size = 1UL << zdev->bars[i].size;
@@ -604,6 +604,16 @@ void pcibios_disable_device(struct pci_dev *pdev)
 
 	zpci_fmb_disable_device(zdev);
 	zpci_debug_exit_device(zdev);
+}
+
+void pcibios_bus_add_device(struct pci_dev *pdev)
+{
+	struct zpci_dev *zdev = to_zpci(pdev);
+
+	if (zdev->vfn) {
+		/* Set no_command_memory on all VFs */
+		pdev->no_command_memory = 1;
+	}
 }
 
 #ifdef CONFIG_HIBERNATE_CALLBACKS
@@ -934,5 +944,5 @@ subsys_initcall_sync(pci_base_init);
 void zpci_rescan(void)
 {
 	if (zpci_is_enabled())
-		clp_rescan_pci_devices_simple();
+		clp_rescan_pci_devices_simple(NULL);
 }

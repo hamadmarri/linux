@@ -95,9 +95,7 @@ struct rvt_dev_info *rvt_alloc_device(size_t size, int nports)
 	if (!rdi)
 		return rdi;
 
-	rdi->ports = kcalloc(nports,
-			     sizeof(struct rvt_ibport **),
-			     GFP_KERNEL);
+	rdi->ports = kcalloc(nports, sizeof(*rdi->ports), GFP_KERNEL);
 	if (!rdi->ports)
 		ib_dealloc_device(&rdi->ibdev);
 
@@ -282,12 +280,6 @@ static int rvt_query_gid(struct ib_device *ibdev, u8 port_num,
 
 	return rdi->driver_f.get_guid_be(rdi, rvp, guid_index,
 					 &gid->global.interface_id);
-}
-
-static inline struct rvt_ucontext *to_iucontext(struct ib_ucontext
-						*ibucontext)
-{
-	return container_of(ibucontext, struct rvt_ucontext, ibucontext);
 }
 
 /**
@@ -683,9 +675,10 @@ EXPORT_SYMBOL(rvt_unregister_device);
 
 /**
  * rvt_init_port - init internal data for driver port
- * @rdi: rvt dev strut
+ * @rdi: rvt_dev_info struct
  * @port: rvt port
  * @port_index: 0 based index of ports, different from IB core port num
+ * @pkey_table: pkey_table for @port
  *
  * Keep track of a list of ports. No need to have a detach port.
  * They persist until the driver goes away.

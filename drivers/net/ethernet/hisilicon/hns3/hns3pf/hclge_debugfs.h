@@ -4,6 +4,9 @@
 #ifndef __HCLGE_DEBUGFS_H
 #define __HCLGE_DEBUGFS_H
 
+#include <linux/etherdevice.h>
+#include "hclge_cmd.h"
+
 #define HCLGE_DBG_BUF_LEN	   256
 #define HCLGE_DBG_MNG_TBL_MAX	   64
 
@@ -31,8 +34,6 @@
 #define HCLGE_DBG_DFX_TQP_OFFSET   11
 
 #define HCLGE_DBG_DFX_SSU_2_OFFSET 12
-
-#pragma pack(1)
 
 struct hclge_qos_pri_map_cmd {
 	u8 pri0_tc  : 4,
@@ -63,12 +64,24 @@ struct hclge_dbg_bitmap_cmd {
 	};
 };
 
-struct hclge_dbg_dfx_message {
-	int flag;
-	char message[60];
+struct hclge_dbg_reg_common_msg {
+	int msg_num;
+	int offset;
+	enum hclge_opcode_type cmd;
 };
 
-#pragma pack()
+#define	HCLGE_DBG_MAX_DFX_MSG_LEN	60
+struct hclge_dbg_dfx_message {
+	int flag;
+	char message[HCLGE_DBG_MAX_DFX_MSG_LEN];
+};
+
+#define HCLGE_DBG_MAC_REG_TYPE_LEN	32
+struct hclge_dbg_reg_type_info {
+	const char *reg_type;
+	struct hclge_dbg_dfx_message *dfx_msg;
+	struct hclge_dbg_reg_common_msg reg_msg;
+};
 
 static struct hclge_dbg_dfx_message hclge_dbg_bios_common_reg[] = {
 	{false, "Reserved"},

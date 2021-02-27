@@ -1,4 +1,4 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 #
 #	namespace.pl.  Mon Aug 30 2004
 #

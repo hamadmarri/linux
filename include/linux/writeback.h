@@ -197,6 +197,7 @@ void wakeup_flusher_threads(enum wb_reason reason);
 void wakeup_flusher_threads_bdi(struct backing_dev_info *bdi,
 				enum wb_reason reason);
 void inode_wait_for_writeback(struct inode *inode);
+void inode_io_list_del(struct inode *inode);
 
 /* writeback.h requires fs.h; it, too, is not included from here. */
 static inline void wait_on_inode(struct inode *inode)
@@ -217,6 +218,8 @@ void wbc_attach_and_unlock_inode(struct writeback_control *wbc,
 void wbc_detach_inode(struct writeback_control *wbc);
 void wbc_account_cgroup_owner(struct writeback_control *wbc, struct page *page,
 			      size_t bytes);
+int cgroup_writeback_by_id(u64 bdi_id, int memcg_id, unsigned long nr_pages,
+			   enum wb_reason reason, struct wb_completion *done);
 void cgroup_writeback_umount(void);
 
 /**

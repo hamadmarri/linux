@@ -17,7 +17,7 @@
 #include "xfs_refcount_item.h"
 #include "xfs_log.h"
 #include "xfs_refcount.h"
-
+#include "xfs_error.h"
 
 kmem_zone_t	*xfs_cui_zone;
 kmem_zone_t	*xfs_cud_zone;
@@ -144,9 +144,9 @@ xfs_cui_init(
 	ASSERT(nextents > 0);
 	if (nextents > XFS_CUI_MAX_FAST_EXTENTS)
 		cuip = kmem_zalloc(xfs_cui_log_item_sizeof(nextents),
-				KM_SLEEP);
+				0);
 	else
-		cuip = kmem_zone_zalloc(xfs_cui_zone, KM_SLEEP);
+		cuip = kmem_zone_zalloc(xfs_cui_zone, 0);
 
 	xfs_log_item_init(mp, &cuip->cui_item, XFS_LI_CUI, &xfs_cui_item_ops);
 	cuip->cui_format.cui_nextents = nextents;
@@ -223,7 +223,7 @@ xfs_trans_get_cud(
 {
 	struct xfs_cud_log_item		*cudp;
 
-	cudp = kmem_zone_zalloc(xfs_cud_zone, KM_SLEEP);
+	cudp = kmem_zone_zalloc(xfs_cud_zone, 0);
 	xfs_log_item_init(tp->t_mountp, &cudp->cud_item, XFS_LI_CUD,
 			  &xfs_cud_item_ops);
 	cudp->cud_cuip = cuip;
@@ -497,7 +497,7 @@ xfs_cui_recover(
 			 */
 			set_bit(XFS_CUI_RECOVERED, &cuip->cui_flags);
 			xfs_cui_release(cuip);
-			return -EIO;
+			return -EFSCORRUPTED;
 		}
 	}
 
@@ -536,6 +536,7 @@ xfs_cui_recover(
 			type = refc_type;
 			break;
 		default:
+			XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, mp);
 			error = -EFSCORRUPTED;
 			goto abort_error;
 		}

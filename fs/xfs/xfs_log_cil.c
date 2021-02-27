@@ -38,7 +38,7 @@ xlog_cil_ticket_alloc(
 	struct xlog_ticket *tic;
 
 	tic = xlog_ticket_alloc(log, 0, 1, XFS_TRANSACTION, 0,
-				KM_SLEEP|KM_NOFS);
+				KM_NOFS);
 
 	/*
 	 * set the current reservation to zero so we know to steal the basic
@@ -186,7 +186,7 @@ xlog_cil_alloc_shadow_bufs(
 			 */
 			kmem_free(lip->li_lv_shadow);
 
-			lv = kmem_alloc_large(buf_size, KM_SLEEP | KM_NOFS);
+			lv = kmem_alloc_large(buf_size, KM_NOFS);
 			memset(lv, 0, xlog_cil_iovec_space(niovecs));
 
 			lv->lv_item = lip;
@@ -574,10 +574,10 @@ xlog_discard_busy_extents(
  */
 static void
 xlog_cil_committed(
-	struct xfs_cil_ctx	*ctx,
-	bool			abort)
+	struct xfs_cil_ctx	*ctx)
 {
 	struct xfs_mount	*mp = ctx->cil->xc_log->l_mp;
+	bool			abort = XLOG_FORCED_SHUTDOWN(ctx->cil->xc_log);
 
 	/*
 	 * If the I/O failed, we're aborting the commit and already shutdown.
@@ -613,37 +613,38 @@ xlog_cil_committed(
 
 void
 xlog_cil_process_committed(
-	struct list_head	*list,
-	bool			aborted)
+	struct list_head	*list)
 {
 	struct xfs_cil_ctx	*ctx;
 
 	while ((ctx = list_first_entry_or_null(list,
 			struct xfs_cil_ctx, iclog_entry))) {
 		list_del(&ctx->iclog_entry);
-		xlog_cil_committed(ctx, aborted);
+		xlog_cil_committed(ctx);
 	}
 }
 
 /*
- * Push the Committed Item List to the log. If @push_seq flag is zero, then it
- * is a background flush and so we can chose to ignore it. Otherwise, if the
- * current sequence is the same as @push_seq we need to do a flush. If
- * @push_seq is less than the current sequence, then it has already been
+ * Push the Committed Item List to the log.
+ *
+ * If the current sequence is the same as xc_push_seq we need to do a flush. If
+ * xc_push_seq is less than the current sequence, then it has already been
  * flushed and we don't need to do anything - the caller will wait for it to
  * complete if necessary.
  *
- * @push_seq is a value rather than a flag because that allows us to do an
- * unlocked check of the sequence number for a match. Hence we can allows log
- * forces to run racily and not issue pushes for the same sequence twice. If we
- * get a race between multiple pushes for the same sequence they will block on
- * the first one and then abort, hence avoiding needless pushes.
+ * xc_push_seq is checked unlocked against the sequence number for a match.
+ * Hence we can allow log forces to run racily and not issue pushes for the
+ * same sequence twice.  If we get a race between multiple pushes for the same
+ * sequence they will block on the first one and then abort, hence avoiding
+ * needless pushes.
  */
-STATIC int
-xlog_cil_push(
-	struct xlog		*log)
+static void
+xlog_cil_push_work(
+	struct work_struct	*work)
 {
-	struct xfs_cil		*cil = log->l_cilp;
+	struct xfs_cil		*cil =
+		container_of(work, struct xfs_cil, xc_push_work);
+	struct xlog		*log = cil->xc_log;
 	struct xfs_log_vec	*lv;
 	struct xfs_cil_ctx	*ctx;
 	struct xfs_cil_ctx	*new_ctx;
@@ -657,10 +658,7 @@ xlog_cil_push(
 	xfs_lsn_t		commit_lsn;
 	xfs_lsn_t		push_seq;
 
-	if (!cil)
-		return 0;
-
-	new_ctx = kmem_zalloc(sizeof(*new_ctx), KM_SLEEP|KM_NOFS);
+	new_ctx = kmem_zalloc(sizeof(*new_ctx), KM_NOFS);
 	new_ctx->ticket = xlog_cil_ticket_alloc(log);
 
 	down_write(&cil->xc_ctx_lock);
@@ -803,7 +801,7 @@ xlog_cil_push(
 	lvhdr.lv_iovecp = &lhdr;
 	lvhdr.lv_next = ctx->lv_chain;
 
-	error = xlog_write(log, &lvhdr, tic, &ctx->start_lsn, NULL, 0);
+	error = xlog_write(log, &lvhdr, tic, &ctx->start_lsn, NULL, 0, true);
 	if (error)
 		goto out_abort_free_ticket;
 
@@ -841,13 +839,14 @@ restart:
 	}
 	spin_unlock(&cil->xc_push_lock);
 
-	/* xfs_log_done always frees the ticket on error. */
-	commit_lsn = xfs_log_done(log->l_mp, tic, &commit_iclog, false);
-	if (commit_lsn == -1)
-		goto out_abort;
+	error = xlog_commit_record(log, tic, &commit_iclog, &commit_lsn);
+	if (error)
+		goto out_abort_free_ticket;
+
+	xfs_log_ticket_ungrant(log, tic);
 
 	spin_lock(&commit_iclog->ic_callback_lock);
-	if (commit_iclog->ic_state & XLOG_STATE_IOERROR) {
+	if (commit_iclog->ic_state == XLOG_STATE_IOERROR) {
 		spin_unlock(&commit_iclog->ic_callback_lock);
 		goto out_abort;
 	}
@@ -867,28 +866,20 @@ restart:
 	spin_unlock(&cil->xc_push_lock);
 
 	/* release the hounds! */
-	return xfs_log_release_iclog(log->l_mp, commit_iclog);
+	xfs_log_release_iclog(commit_iclog);
+	return;
 
 out_skip:
 	up_write(&cil->xc_ctx_lock);
 	xfs_log_ticket_put(new_ctx->ticket);
 	kmem_free(new_ctx);
-	return 0;
+	return;
 
 out_abort_free_ticket:
-	xfs_log_ticket_put(tic);
+	xfs_log_ticket_ungrant(log, tic);
 out_abort:
-	xlog_cil_committed(ctx, true);
-	return -EIO;
-}
-
-static void
-xlog_cil_push_work(
-	struct work_struct	*work)
-{
-	struct xfs_cil		*cil = container_of(work, struct xfs_cil,
-							xc_push_work);
-	xlog_cil_push(cil->xc_log);
+	ASSERT(XLOG_FORCED_SHUTDOWN(log));
+	xlog_cil_committed(ctx);
 }
 
 /*
@@ -1017,7 +1008,10 @@ xfs_log_commit_cil(
 	if (commit_lsn)
 		*commit_lsn = xc_commit_lsn;
 
-	xfs_log_done(mp, tp->t_ticket, NULL, regrant);
+	if (regrant && !XLOG_FORCED_SHUTDOWN(log))
+		xfs_log_ticket_regrant(log, tp->t_ticket);
+	else
+		xfs_log_ticket_ungrant(log, tp->t_ticket);
 	tp->t_ticket = NULL;
 	xfs_trans_unreserve_and_mod_sb(tp);
 
@@ -1179,11 +1173,11 @@ xlog_cil_init(
 	struct xfs_cil	*cil;
 	struct xfs_cil_ctx *ctx;
 
-	cil = kmem_zalloc(sizeof(*cil), KM_SLEEP|KM_MAYFAIL);
+	cil = kmem_zalloc(sizeof(*cil), KM_MAYFAIL);
 	if (!cil)
 		return -ENOMEM;
 
-	ctx = kmem_zalloc(sizeof(*ctx), KM_SLEEP|KM_MAYFAIL);
+	ctx = kmem_zalloc(sizeof(*ctx), KM_MAYFAIL);
 	if (!ctx) {
 		kmem_free(cil);
 		return -ENOMEM;

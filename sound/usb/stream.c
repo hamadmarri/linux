@@ -28,6 +28,14 @@
 #include "power.h"
 #include "media.h"
 
+static void audioformat_free(struct audioformat *fp)
+{
+	list_del(&fp->list); /* unlink for avoiding double-free */
+	kfree(fp->rate_table);
+	kfree(fp->chmap);
+	kfree(fp);
+}
+
 /*
  * free a substream
  */
@@ -37,12 +45,8 @@ static void free_substream(struct snd_usb_substream *subs)
 
 	if (!subs->num_formats)
 		return; /* not initialized */
-	list_for_each_entry_safe(fp, n, &subs->fmt_list, list) {
-		kfree(fp->rate_table);
-		kfree(fp->chmap);
-		kfree(fp);
-	}
-	kfree(subs->rate_list.list);
+	list_for_each_entry_safe(fp, n, &subs->fmt_list, list)
+		audioformat_free(fp);
 	kfree(subs->str_pd);
 	snd_media_stream_delete(subs);
 }
@@ -89,6 +93,7 @@ static void snd_usb_init_substream(struct snd_usb_stream *as,
 	subs->tx_length_quirk = as->chip->tx_length_quirk;
 	subs->speed = snd_usb_get_speed(subs->dev);
 	subs->pkt_offset_adj = 0;
+	subs->stream_offset_adj = 0;
 
 	snd_usb_set_pcm_ops(as->pcm, stream);
 
@@ -187,16 +192,16 @@ static int usb_chmap_ctl_get(struct snd_kcontrol *kcontrol,
 	struct snd_pcm_chmap *info = snd_kcontrol_chip(kcontrol);
 	struct snd_usb_substream *subs = info->private_data;
 	struct snd_pcm_chmap_elem *chmap = NULL;
-	int i;
+	int i = 0;
 
-	memset(ucontrol->value.integer.value, 0,
-	       sizeof(ucontrol->value.integer.value));
 	if (subs->cur_audiofmt)
 		chmap = subs->cur_audiofmt->chmap;
 	if (chmap) {
 		for (i = 0; i < chmap->channels; i++)
 			ucontrol->value.integer.value[i] = chmap->map[i];
 	}
+	for (; i < subs->channels_max; i++)
+		ucontrol->value.integer.value[i] = 0;
 	return 0;
 }
 
@@ -497,6 +502,9 @@ static int __snd_usb_add_audio_stream(struct snd_usb_audio *chip,
 		subs = &as->substream[stream];
 		if (subs->ep_num)
 			continue;
+		if (snd_device_get_state(chip->card, as->pcm) !=
+		    SNDRV_DEV_BUILD)
+			chip->need_delayed_register = true;
 		err = snd_pcm_new_stream(as->pcm, stream, 1);
 		if (err < 0)
 			return err;
@@ -832,8 +840,7 @@ found_clock:
 	/* ok, let's parse further... */
 	if (snd_usb_parse_audio_format(chip, fp, format,
 					fmt, stream) < 0) {
-		kfree(fp->rate_table);
-		kfree(fp);
+		audioformat_free(fp);
 		return NULL;
 	}
 
@@ -1044,9 +1051,7 @@ found_clock:
 
 		pd = kzalloc(sizeof(*pd), GFP_KERNEL);
 		if (!pd) {
-			kfree(fp->chmap);
-			kfree(fp->rate_table);
-			kfree(fp);
+			audioformat_free(fp);
 			return NULL;
 		}
 		pd->pd_id = (stream == SNDRV_PCM_STREAM_PLAYBACK) ?
@@ -1065,9 +1070,7 @@ found_clock:
 		/* ok, let's parse further... */
 		if (snd_usb_parse_audio_format_v3(chip, fp, as, stream) < 0) {
 			kfree(pd);
-			kfree(fp->chmap);
-			kfree(fp->rate_table);
-			kfree(fp);
+			audioformat_free(fp);
 			return NULL;
 		}
 	}
@@ -1078,7 +1081,9 @@ found_clock:
 	return fp;
 }
 
-int snd_usb_parse_audio_interface(struct snd_usb_audio *chip, int iface_no)
+static int __snd_usb_parse_audio_interface(struct snd_usb_audio *chip,
+					   int iface_no,
+					   bool *has_non_pcm, bool non_pcm)
 {
 	struct usb_device *dev;
 	struct usb_interface *iface;
@@ -1179,6 +1184,18 @@ int snd_usb_parse_audio_interface(struct snd_usb_audio *chip, int iface_no)
 		else if (IS_ERR(fp))
 			return PTR_ERR(fp);
 
+		if (fp->fmt_type != UAC_FORMAT_TYPE_I)
+			*has_non_pcm = true;
+		if ((fp->fmt_type == UAC_FORMAT_TYPE_I) == non_pcm) {
+			audioformat_free(fp);
+			kfree(pd);
+			fp = NULL;
+			pd = NULL;
+			continue;
+		}
+
+		snd_usb_audioformat_set_sync_ep(chip, fp);
+
 		dev_dbg(&dev->dev, "%u:%d: add audio endpoint %#x\n", iface_no, altno, fp->endpoint);
 		if (protocol == UAC_VERSION_3)
 			err = snd_usb_add_audio_stream_v3(chip, stream, fp, pd);
@@ -1186,18 +1203,52 @@ int snd_usb_parse_audio_interface(struct snd_usb_audio *chip, int iface_no)
 			err = snd_usb_add_audio_stream(chip, stream, fp);
 
 		if (err < 0) {
-			list_del(&fp->list); /* unlink for avoiding double-free */
+			audioformat_free(fp);
 			kfree(pd);
-			kfree(fp->rate_table);
-			kfree(fp->chmap);
-			kfree(fp);
 			return err;
 		}
+
+		/* add endpoints */
+		err = snd_usb_add_endpoint(chip, fp->endpoint,
+					   SND_USB_ENDPOINT_TYPE_DATA);
+		if (err < 0)
+			return err;
+
+		if (fp->sync_ep) {
+			err = snd_usb_add_endpoint(chip, fp->sync_ep,
+						   fp->implicit_fb ?
+						   SND_USB_ENDPOINT_TYPE_DATA :
+						   SND_USB_ENDPOINT_TYPE_SYNC);
+			if (err < 0)
+				return err;
+		}
+
 		/* try to set the interface... */
+		usb_set_interface(chip->dev, iface_no, 0);
+		snd_usb_init_pitch(chip, fp);
+		snd_usb_init_sample_rate(chip, fp, fp->rate_max);
 		usb_set_interface(chip->dev, iface_no, altno);
-		snd_usb_init_pitch(chip, iface_no, alts, fp);
-		snd_usb_init_sample_rate(chip, iface_no, alts, fp, fp->rate_max);
 	}
+	return 0;
+}
+
+int snd_usb_parse_audio_interface(struct snd_usb_audio *chip, int iface_no)
+{
+	int err;
+	bool has_non_pcm = false;
+
+	/* parse PCM formats */
+	err = __snd_usb_parse_audio_interface(chip, iface_no, &has_non_pcm, false);
+	if (err < 0)
+		return err;
+
+	if (has_non_pcm) {
+		/* parse non-PCM formats */
+		err = __snd_usb_parse_audio_interface(chip, iface_no, &has_non_pcm, true);
+		if (err < 0)
+			return err;
+	}
+
 	return 0;
 }
 

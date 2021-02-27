@@ -108,6 +108,29 @@ out:
 	return err;
 }
 
+int tcp_fastopen_get_cipher(struct net *net, struct inet_connection_sock *icsk,
+			    u64 *key)
+{
+	struct tcp_fastopen_context *ctx;
+	int n_keys = 0, i;
+
+	rcu_read_lock();
+	if (icsk)
+		ctx = rcu_dereference(icsk->icsk_accept_queue.fastopenq.ctx);
+	else
+		ctx = rcu_dereference(net->ipv4.tcp_fastopen_ctx);
+	if (ctx) {
+		n_keys = tcp_fastopen_context_len(ctx);
+		for (i = 0; i < n_keys; i++) {
+			put_unaligned_le64(ctx->key[i].key[0], key + (i * 2));
+			put_unaligned_le64(ctx->key[i].key[1], key + (i * 2) + 1);
+		}
+	}
+	rcu_read_unlock();
+
+	return n_keys;
+}
+
 static bool __tcp_fastopen_cookie_gen_cipher(struct request_sock *req,
 					     struct sk_buff *syn,
 					     const siphash_key_t *key,
@@ -253,7 +276,7 @@ static struct sock *tcp_fastopen_create_child(struct sock *sk,
 	 */
 	tp = tcp_sk(child);
 
-	tp->fastopen_rsk = req;
+	rcu_assign_pointer(tp->fastopen_rsk, req);
 	tcp_rsk(req)->tfo_listener = true;
 
 	/* RFC1323: The window in SYN & SYN/ACK segments is never
@@ -422,7 +445,10 @@ bool tcp_fastopen_cookie_check(struct sock *sk, u16 *mss,
 		cookie->len = -1;
 		return true;
 	}
-	return cookie->len > 0;
+	if (cookie->len > 0)
+		return true;
+	tcp_sk(sk)->fastopen_client_fail = TFO_COOKIE_UNAVAILABLE;
+	return false;
 }
 
 /* This function checks if we want to defer sending SYN until the first

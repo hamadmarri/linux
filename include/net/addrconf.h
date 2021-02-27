@@ -202,11 +202,11 @@ u32 ipv6_addr_label(struct net *net, const struct in6_addr *addr,
 /*
  *	multicast prototypes (mcast.c)
  */
-static inline int ipv6_mc_may_pull(struct sk_buff *skb,
-				   unsigned int len)
+static inline bool ipv6_mc_may_pull(struct sk_buff *skb,
+				    unsigned int len)
 {
 	if (skb_transport_offset(skb) + ipv6_transport_len(skb) < len)
-		return 0;
+		return false;
 
 	return pskb_may_pull(skb, len);
 }
@@ -273,6 +273,7 @@ int ipv6_sock_ac_join(struct sock *sk, int ifindex,
 		      const struct in6_addr *addr);
 int ipv6_sock_ac_drop(struct sock *sk, int ifindex,
 		      const struct in6_addr *addr);
+void __ipv6_sock_ac_close(struct sock *sk);
 void ipv6_sock_ac_close(struct sock *sk);
 
 int __ipv6_dev_ac_inc(struct inet6_dev *idev, const struct in6_addr *addr);

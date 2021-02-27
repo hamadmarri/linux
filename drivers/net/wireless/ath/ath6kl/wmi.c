@@ -1827,8 +1827,8 @@ int ath6kl_wmi_cmd_send(struct wmi *wmi, u8 if_idx, struct sk_buff *skb,
 
 	/* Only for OPT_TX_CMD, use BE endpoint. */
 	if (cmd_id == WMI_OPT_TX_FRAME_CMDID) {
-		ret = ath6kl_wmi_data_hdr_add(wmi, skb, OPT_MSGTYPE,
-					      false, false, 0, NULL, if_idx);
+		ret = ath6kl_wmi_data_hdr_add(wmi, skb, OPT_MSGTYPE, false,
+				WMI_DATA_HDR_DATA_TYPE_802_3, 0, NULL, if_idx);
 		if (ret) {
 			dev_kfree_skb(skb);
 			return ret;
@@ -2642,6 +2642,11 @@ int ath6kl_wmi_delete_pstream_cmd(struct wmi *wmi, u8 if_idx, u8 traffic_class,
 
 	if (traffic_class >= WMM_NUM_AC) {
 		ath6kl_err("invalid traffic class: %d\n", traffic_class);
+		return -EINVAL;
+	}
+
+	if (tsid >= 16) {
+		ath6kl_err("invalid tsid: %d\n", tsid);
 		return -EINVAL;
 	}
 

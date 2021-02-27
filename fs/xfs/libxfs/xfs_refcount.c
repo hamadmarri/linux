@@ -1189,7 +1189,7 @@ __xfs_refcount_add(
 			blockcount);
 
 	ri = kmem_alloc(sizeof(struct xfs_refcount_intent),
-			KM_SLEEP | KM_NOFS);
+			KM_NOFS);
 	INIT_LIST_HEAD(&ri->ri_list);
 	ri->ri_type = type;
 	ri->ri_startblock = startblock;
@@ -1599,10 +1599,12 @@ xfs_refcount_recover_extent(
 	struct list_head		*debris = priv;
 	struct xfs_refcount_recovery	*rr;
 
-	if (be32_to_cpu(rec->refc.rc_refcount) != 1)
+	if (be32_to_cpu(rec->refc.rc_refcount) != 1) {
+		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW, cur->bc_mp);
 		return -EFSCORRUPTED;
+	}
 
-	rr = kmem_alloc(sizeof(struct xfs_refcount_recovery), KM_SLEEP);
+	rr = kmem_alloc(sizeof(struct xfs_refcount_recovery), 0);
 	xfs_refcount_btrec_to_irec(rec, &rr->rr_rrec);
 	list_add_tail(&rr->rr_list, debris);
 

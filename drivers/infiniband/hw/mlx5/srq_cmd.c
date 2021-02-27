@@ -83,11 +83,11 @@ struct mlx5_core_srq *mlx5_cmd_get_srq(struct mlx5_ib_dev *dev, u32 srqn)
 	struct mlx5_srq_table *table = &dev->srq_table;
 	struct mlx5_core_srq *srq;
 
-	xa_lock(&table->array);
+	xa_lock_irq(&table->array);
 	srq = xa_load(&table->array, srqn);
 	if (srq)
-		atomic_inc(&srq->common.refcount);
-	xa_unlock(&table->array);
+		refcount_inc(&srq->common.refcount);
+	xa_unlock_irq(&table->array);
 
 	return srq;
 }
@@ -592,7 +592,7 @@ int mlx5_cmd_create_srq(struct mlx5_ib_dev *dev, struct mlx5_core_srq *srq,
 	if (err)
 		return err;
 
-	atomic_set(&srq->common.refcount, 1);
+	refcount_set(&srq->common.refcount, 1);
 	init_completion(&srq->common.free);
 
 	err = xa_err(xa_store_irq(&table->array, srq->srqn, srq, GFP_KERNEL));
@@ -675,7 +675,7 @@ static int srq_event_notifier(struct notifier_block *nb,
 	xa_lock(&table->array);
 	srq = xa_load(&table->array, srqn);
 	if (srq)
-		atomic_inc(&srq->common.refcount);
+		refcount_inc(&srq->common.refcount);
 	xa_unlock(&table->array);
 
 	if (!srq)

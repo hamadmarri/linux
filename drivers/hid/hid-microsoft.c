@@ -303,7 +303,7 @@ static void ms_ff_worker(struct work_struct *work)
 	r->magnitude[MAGNITUDE_WEAK] = ms->weak;     /* right actuator */
 
 	ret = hid_hw_output_report(hdev, (__u8 *)r, sizeof(*r));
-	if (ret)
+	if (ret < 0)
 		hid_warn(hdev, "failed to send FF report\n");
 }
 
@@ -450,6 +450,8 @@ static const struct hid_device_id ms_devices[] = {
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_MICROSOFT, 0x091B),
 		.driver_data = MS_SURFACE_DIAL },
 	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_MICROSOFT, USB_DEVICE_ID_MS_XBOX_ONE_S_CONTROLLER),
+		.driver_data = MS_QUIRK_FF },
+	{ HID_BLUETOOTH_DEVICE(USB_VENDOR_ID_MICROSOFT, USB_DEVICE_ID_8BITDO_SN30_PRO_PLUS),
 		.driver_data = MS_QUIRK_FF },
 	{ }
 };

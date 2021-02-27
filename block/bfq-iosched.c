@@ -123,6 +123,7 @@
 #include <linux/ioprio.h>
 #include <linux/sbitmap.h>
 #include <linux/delay.h>
+#include <linux/backing-dev.h>
 
 #include "blk.h"
 #include "blk-mq.h"
@@ -170,7 +171,7 @@ static const int bfq_back_max = 16 * 1024;
 static const int bfq_back_penalty = 2;
 
 /* Idling period duration, in ns. */
-static u64 bfq_slice_idle = NSEC_PER_SEC / 125;
+static u64 bfq_slice_idle = NSEC_PER_SEC / 1000;
 
 /* Minimum number of assigned budgets for which stats are safe to compute. */
 static const int bfq_stats_min_budgets = 194;
@@ -2016,7 +2017,7 @@ static void bfq_add_request(struct request *rq)
 		     (bfqq->last_serv_time_ns > 0 &&
 		      bfqd->rqs_injected && bfqd->rq_in_driver > 0)) &&
 		    time_is_before_eq_jiffies(bfqq->decrease_time_jif +
-					      msecs_to_jiffies(100))) {
+					      msecs_to_jiffies(10))) {
 			bfqd->last_empty_occupied_ns = ktime_get_ns();
 			/*
 			 * Start the state machine for measuring the
@@ -2025,7 +2026,21 @@ static void bfq_add_request(struct request *rq)
 			 * be set when rq will be dispatched.
 			 */
 			bfqd->wait_dispatch = true;
-			bfqd->rqs_injected = false;
+			/*
+			 * If there is no I/O in service in the drive,
+			 * then possible injection occurred before the
+			 * arrival of rq will not affect the total
+			 * service time of rq. So the injection limit
+			 * must not be updated as a function of such
+			 * total service time, unless new injection
+			 * occurs before rq is completed. To have the
+			 * injection limit updated only in the latter
+			 * case, reset rqs_injected here (rqs_injected
+			 * will be set in case injection is performed
+			 * on bfqq before rq is completed).
+			 */
+			if (bfqd->rq_in_driver == 0)
+				bfqd->rqs_injected = false;
 		}
 	}
 
@@ -2699,8 +2714,6 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 	}
 }
 
-
-static
 void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
 	/*
@@ -2921,6 +2934,7 @@ static void __bfq_set_in_service_queue(struct bfq_data *bfqd,
 	}
 
 	bfqd->in_service_queue = bfqq;
+	bfqd->in_serv_last_pos = -1;
 }
 
 /*
@@ -3430,6 +3444,10 @@ static void bfq_dispatch_remove(struct request_queue *q, struct request *rq)
 static bool idling_needed_for_service_guarantees(struct bfq_data *bfqd,
 						 struct bfq_queue *bfqq)
 {
+	/* No point in idling for bfqq if it won't get requests any longer */
+	if (unlikely(!bfqq_process_refs(bfqq)))
+		return false;
+
 	return (bfqq->wr_coeff > 1 &&
 		(bfqd->wr_busy_queues <
 		 bfq_tot_busy_queues(bfqd) ||
@@ -4063,6 +4081,10 @@ static bool idling_boosts_thr_without_issues(struct bfq_data *bfqd,
 		bfqq_sequential_and_IO_bound,
 		idling_boosts_thr;
 
+	/* No point in idling for bfqq if it won't get requests any longer */
+	if (unlikely(!bfqq_process_refs(bfqq)))
+		return false;
+
 	bfqq_sequential_and_IO_bound = !BFQQ_SEEKY(bfqq) &&
 		bfq_bfqq_IO_bound(bfqq) && bfq_bfqq_has_short_ttime(bfqq);
 
@@ -4155,6 +4177,10 @@ static bool bfq_better_to_idle(struct bfq_queue *bfqq)
 {
 	struct bfq_data *bfqd = bfqq->bfqd;
 	bool idling_boosts_thr_with_no_issue, idling_needed_for_service_guar;
+
+	/* No point in idling for bfqq if it won't get requests any longer */
+	if (unlikely(!bfqq_process_refs(bfqq)))
+		return false;
 
 	if (unlikely(bfqd->strict_guarantees))
 		return true;
@@ -4471,7 +4497,7 @@ check_queue:
 			bfqq = bfqq->bic->bfqq[0];
 		else if (bfq_bfqq_has_waker(bfqq) &&
 			   bfq_bfqq_busy(bfqq->waker_bfqq) &&
-			   bfqq->next_rq &&
+			   bfqq->waker_bfqq->next_rq &&
 			   bfq_serv_to_charge(bfqq->waker_bfqq->next_rq,
 					      bfqq->waker_bfqq) <=
 			   bfq_bfqq_budget_left(bfqq->waker_bfqq)
@@ -4953,8 +4979,9 @@ bfq_set_next_ioprio_data(struct bfq_queue *bfqq, struct bfq_io_cq *bic)
 	ioprio_class = IOPRIO_PRIO_CLASS(bic->ioprio);
 	switch (ioprio_class) {
 	default:
-		dev_err(bfqq->bfqd->queue->backing_dev_info->dev,
-			"bfq: bad prio class %d\n", ioprio_class);
+		pr_err("bdi %s: bfq: bad prio class %d\n",
+				bdi_dev_name(bfqq->bfqd->queue->backing_dev_info),
+				ioprio_class);
 		/* fall through */
 	case IOPRIO_CLASS_NONE:
 		/*
@@ -5166,11 +5193,19 @@ static void bfq_update_io_thinktime(struct bfq_data *bfqd,
 				    struct bfq_queue *bfqq)
 {
 	struct bfq_ttime *ttime = &bfqq->ttime;
-	u64 elapsed = ktime_get_ns() - bfqq->ttime.last_end_request;
-
+	u64 elapsed;
+	
+	/*
+	 * We are really interested in how long it takes for the queue to
+	 * become busy when there is no outstanding IO for this queue. So
+	 * ignore cases when the bfq queue has already IO queued.
+	 */
+	if (bfqq->dispatched || bfq_bfqq_busy(bfqq))
+		return;
+	elapsed = ktime_get_ns() - bfqq->ttime.last_end_request;
 	elapsed = min_t(u64, elapsed, 2ULL * bfqd->bfq_slice_idle);
 
-	ttime->ttime_samples = (7*bfqq->ttime.ttime_samples + 256) / 8;
+	ttime->ttime_samples = (7*ttime->ttime_samples + 256) / 8;
 	ttime->ttime_total = div_u64(7*ttime->ttime_total + 256*elapsed,  8);
 	ttime->ttime_mean = div64_ul(ttime->ttime_total + 128,
 				     ttime->ttime_samples);
@@ -5804,14 +5839,14 @@ static void bfq_update_inject_limit(struct bfq_data *bfqd,
 	u64 tot_time_ns = ktime_get_ns() - bfqd->last_empty_occupied_ns;
 	unsigned int old_limit = bfqq->inject_limit;
 
-	if (bfqq->last_serv_time_ns > 0) {
+	if (bfqq->last_serv_time_ns > 0 && bfqd->rqs_injected) {
 		u64 threshold = (bfqq->last_serv_time_ns * 3)>>1;
 
 		if (tot_time_ns >= threshold && old_limit > 0) {
 			bfqq->inject_limit--;
 			bfqq->decrease_time_jif = jiffies;
 		} else if (tot_time_ns < threshold &&
-			   old_limit < bfqd->max_rq_in_driver<<1)
+			   old_limit <= bfqd->max_rq_in_driver)
 			bfqq->inject_limit++;
 	}
 
@@ -5852,6 +5887,7 @@ static void bfq_update_inject_limit(struct bfq_data *bfqd,
 
 	/* update complete, not waiting for any request completion any longer */
 	bfqd->waited_rq = NULL;
+	bfqd->rqs_injected = false;
 }
 
 /*
@@ -6183,19 +6219,27 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
 	return bfqq;
 }
 
-static void bfq_idle_slice_timer_body(struct bfq_queue *bfqq)
+static void
+bfq_idle_slice_timer_body(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
-	struct bfq_data *bfqd = bfqq->bfqd;
 	enum bfqq_expiration reason;
 	unsigned long flags;
 
 	spin_lock_irqsave(&bfqd->lock, flags);
-	bfq_clear_bfqq_wait_request(bfqq);
 
+	/*
+	 * Considering that bfqq may be in race, we should firstly check
+	 * whether bfqq is in service before doing something on it. If
+	 * the bfqq in race is not in service, it has already been expired
+	 * through __bfq_bfqq_expire func and its wait_request flags has
+	 * been cleared in __bfq_bfqd_reset_in_service func.
+	 */
 	if (bfqq != bfqd->in_service_queue) {
 		spin_unlock_irqrestore(&bfqd->lock, flags);
 		return;
 	}
+
+	bfq_clear_bfqq_wait_request(bfqq);
 
 	if (bfq_bfqq_budget_timeout(bfqq))
 		/*
@@ -6241,7 +6285,7 @@ static enum hrtimer_restart bfq_idle_slice_timer(struct hrtimer *timer)
 	 * early.
 	 */
 	if (bfqq)
-		bfq_idle_slice_timer_body(bfqq);
+		bfq_idle_slice_timer_body(bfqd, bfqq);
 
 	return HRTIMER_NORESTART;
 }

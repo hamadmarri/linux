@@ -252,6 +252,13 @@ static vm_fault_t xive_native_esb_fault(struct vm_fault *vmf)
 	}
 
 	state = &sb->irq_state[src];
+
+	/* Some sanity checking */
+	if (!state->valid) {
+		pr_devel("%s: source %lx invalid !\n", __func__, irq);
+		return VM_FAULT_SIGBUS;
+	}
+
 	kvmppc_xive_select_irq(state, &hw_num, &xd);
 
 	arch_spin_lock(&sb->lock);
@@ -638,7 +645,7 @@ static int kvmppc_xive_native_set_queue_config(struct kvmppc_xive *xive,
 	srcu_idx = srcu_read_lock(&kvm->srcu);
 	gfn = gpa_to_gfn(kvm_eq.qaddr);
 
-	page_size = kvm_host_page_size(kvm, gfn);
+	page_size = kvm_host_page_size(vcpu, gfn);
 	if (1ull << kvm_eq.qshift > page_size) {
 		srcu_read_unlock(&kvm->srcu, srcu_idx);
 		pr_warn("Incompatible host page size %lx!\n", page_size);

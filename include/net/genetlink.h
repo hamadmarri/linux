@@ -35,12 +35,6 @@ struct genl_info;
  *	do additional, common, filtering and return an error
  * @post_doit: called after an operation's doit callback, it may
  *	undo operations done by pre_doit, for example release locks
- * @mcast_bind: a socket bound to the given multicast group (which
- *	is given as the offset into the groups array)
- * @mcast_unbind: a socket was unbound from the given multicast group.
- *	Note that unbind() will not be called symmetrically if the
- *	generic netlink family is removed while there are still open
- *	sockets.
  * @attrbuf: buffer to store parsed attributes (private)
  * @mcgrps: multicast groups used by this family
  * @n_mcgrps: number of multicast groups
@@ -64,6 +58,7 @@ struct genl_family {
 	void			(*post_doit)(const struct genl_ops *ops,
 					     struct sk_buff *skb,
 					     struct genl_info *info);
+	/* these 2 are kABI placeholders */
 	int			(*mcast_bind)(struct net *net, int group);
 	void			(*mcast_unbind)(struct net *net, int group);
 	struct nlattr **	attrbuf;	/* private */
@@ -126,6 +121,24 @@ enum genl_validate_flags {
 	GENL_DONT_VALIDATE_DUMP			= BIT(1),
 	GENL_DONT_VALIDATE_DUMP_STRICT		= BIT(2),
 };
+
+/**
+ * struct genl_info - info that is available during dumpit op call
+ * @family: generic netlink family - for internal genl code usage
+ * @ops: generic netlink ops - for internal genl code usage
+ * @attrs: netlink attributes
+ */
+struct genl_dumpit_info {
+	const struct genl_family *family;
+	const struct genl_ops *ops;
+	struct nlattr **attrs;
+};
+
+static inline const struct genl_dumpit_info *
+genl_dumpit_info(struct netlink_callback *cb)
+{
+	return cb->data;
+}
 
 /**
  * struct genl_ops - generic netlink operations

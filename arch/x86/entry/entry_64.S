@@ -249,7 +249,6 @@ GLOBAL(entry_SYSCALL_64_after_hwframe)
 	 */
 syscall_return_via_sysret:
 	/* rcx and r11 are already restored (see code above) */
-	UNWIND_HINT_EMPTY
 	POP_REGS pop_rdi=0 skip_r11rcx=1
 
 	/*
@@ -258,6 +257,7 @@ syscall_return_via_sysret:
 	 */
 	movq	%rsp, %rdi
 	movq	PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %rsp
+	UNWIND_HINT_EMPTY
 
 	pushq	RSP-RDI(%rdi)	/* RSP */
 	pushq	(%rdi)		/* RDI */
@@ -280,7 +280,6 @@ END(entry_SYSCALL_64)
  * %rsi: next task
  */
 ENTRY(__switch_to_asm)
-	UNWIND_HINT_FUNC
 	/*
 	 * Save callee-saved registers
 	 * This must match the order in inactive_task_frame
@@ -321,7 +320,7 @@ ENTRY(__switch_to_asm)
 	popq	%rbp
 
 	jmp	__switch_to
-END(__switch_to_asm)
+ENDPROC(__switch_to_asm)
 
 /*
  * A newly forked process directly context switches into this address.
@@ -637,6 +636,7 @@ GLOBAL(swapgs_restore_regs_and_return_to_usermode)
 	 */
 	movq	%rsp, %rdi
 	movq	PER_CPU_VAR(cpu_tss_rw + TSS_sp0), %rsp
+	UNWIND_HINT_EMPTY
 
 	/* Copy the IRET frame to the trampoline stack. */
 	pushq	6*8(%rdi)	/* SS */
@@ -664,7 +664,7 @@ GLOBAL(swapgs_restore_regs_and_return_to_usermode)
 
 /* Returning to kernel space */
 retint_kernel:
-#ifdef CONFIG_PREEMPT
+#ifdef CONFIG_PREEMPTION
 	/* Interrupts are off */
 	/* Check if we need preemption */
 	btl	$9, EFLAGS(%rsp)		/* were interrupts off? */
@@ -1087,6 +1087,7 @@ ENDPROC(do_softirq_own_stack)
 
 #ifdef CONFIG_XEN_PV
 idtentry hypervisor_callback xen_do_hypervisor_callback has_error_code=0
+idtentry xenpv_unknown_trap xen_do_unknown_trap has_error_code=0
 
 /*
  * A note on the "critical region" in our callback handler.
@@ -1115,7 +1116,7 @@ ENTRY(xen_do_hypervisor_callback)		/* do_hypervisor_callback(struct *pt_regs) */
 	call	xen_evtchn_do_upcall
 	LEAVE_IRQ_STACK
 
-#ifndef CONFIG_PREEMPT
+#ifndef CONFIG_PREEMPTION
 	call	xen_maybe_preempt_hcall
 #endif
 	jmp	error_exit
@@ -1739,7 +1740,7 @@ ENTRY(rewind_stack_do_exit)
 
 	movq	PER_CPU_VAR(cpu_current_top_of_stack), %rax
 	leaq	-PTREGS_SIZE(%rax), %rsp
-	UNWIND_HINT_FUNC sp_offset=PTREGS_SIZE
+	UNWIND_HINT_REGS
 
 	call	do_exit
 END(rewind_stack_do_exit)

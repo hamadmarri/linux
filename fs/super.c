@@ -153,6 +153,59 @@ static unsigned long super_cache_count(struct shrinker *shrink,
 	return total_objects;
 }
 
+static bool super_dev_match(struct super_block *sb, dev_t dev)
+{
+	struct super_block_dev *sbdev;
+
+	if (sb->s_dev == dev)
+		return true;
+
+	if (list_empty(&sb->s_sbdevs))
+		return false;
+
+	list_for_each_entry(sbdev, &sb->s_sbdevs, entry)
+		if (sbdev->anon_dev == dev)
+			return true;
+
+	return false;
+}
+
+/* To be used only by btrfs */
+int insert_anon_sbdev(struct super_block *sb, struct super_block_dev *sbdev)
+{
+	int ret;
+
+	ret = get_anon_bdev(&sbdev->anon_dev);
+	if (ret)
+		return ret;
+
+	sbdev->sb = sb;
+
+	spin_lock(&sb_lock);
+	list_add_tail(&sbdev->entry, &sb->s_sbdevs);
+	spin_unlock(&sb_lock);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(insert_anon_sbdev);
+
+/* To be used only by btrfs */
+void remove_anon_sbdev(struct super_block_dev *sbdev)
+{
+	bool remove = false;
+
+	spin_lock(&sb_lock);
+	if (!list_empty(&sbdev->entry)) {
+		remove = true;
+		list_del_init(&sbdev->entry);
+	}
+	spin_unlock(&sb_lock);
+
+	if (remove)
+		free_anon_bdev(sbdev->anon_dev);
+}
+EXPORT_SYMBOL_GPL(remove_anon_sbdev);
+
 static void destroy_super_work(struct work_struct *work)
 {
 	struct super_block *s = container_of(work, struct super_block,
@@ -180,6 +233,7 @@ static void destroy_unused_super(struct super_block *s)
 	list_lru_destroy(&s->s_dentry_lru);
 	list_lru_destroy(&s->s_inode_lru);
 	security_sb_free(s);
+	WARN_ON(!list_empty(&s->s_sbdevs));
 	put_user_ns(s->s_user_ns);
 	kfree(s->s_subtype);
 	free_prealloced_shrinker(&s->s_shrink);
@@ -248,6 +302,7 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags,
 	spin_lock_init(&s->s_inode_list_lock);
 	INIT_LIST_HEAD(&s->s_inodes_wb);
 	spin_lock_init(&s->s_inode_wblist_lock);
+	INIT_LIST_HEAD(&s->s_sbdevs);
 
 	s->s_count = 1;
 	atomic_set(&s->s_active, 1);
@@ -870,7 +925,7 @@ rescan:
 	list_for_each_entry(sb, &super_blocks, s_list) {
 		if (hlist_unhashed(&sb->s_instances))
 			continue;
-		if (sb->s_dev ==  dev) {
+		if (super_dev_match(sb, dev)) {
 			sb->s_count++;
 			spin_unlock(&sb_lock);
 			down_read(&sb->s_umount);
@@ -1212,6 +1267,7 @@ int get_tree_single(struct fs_context *fc,
 EXPORT_SYMBOL(get_tree_single);
 
 #ifdef CONFIG_BLOCK
+
 static int set_bdev_super(struct super_block *s, void *data)
 {
 	s->s_bdev = data;
@@ -1220,6 +1276,99 @@ static int set_bdev_super(struct super_block *s, void *data)
 
 	return 0;
 }
+
+static int set_bdev_super_fc(struct super_block *s, struct fs_context *fc)
+{
+	return set_bdev_super(s, fc->sget_key);
+}
+
+static int test_bdev_super_fc(struct super_block *s, struct fs_context *fc)
+{
+	return s->s_bdev == fc->sget_key;
+}
+
+/**
+ * get_tree_bdev - Get a superblock based on a single block device
+ * @fc: The filesystem context holding the parameters
+ * @fill_super: Helper to initialise a new superblock
+ */
+int get_tree_bdev(struct fs_context *fc,
+		int (*fill_super)(struct super_block *,
+				  struct fs_context *))
+{
+	struct block_device *bdev;
+	struct super_block *s;
+	fmode_t mode = FMODE_READ | FMODE_EXCL;
+	int error = 0;
+
+	if (!(fc->sb_flags & SB_RDONLY))
+		mode |= FMODE_WRITE;
+
+	if (!fc->source)
+		return invalf(fc, "No source specified");
+
+	bdev = blkdev_get_by_path(fc->source, mode, fc->fs_type);
+	if (IS_ERR(bdev)) {
+		errorf(fc, "%s: Can't open blockdev", fc->source);
+		return PTR_ERR(bdev);
+	}
+
+	/* Once the superblock is inserted into the list by sget_fc(), s_umount
+	 * will protect the lockfs code from trying to start a snapshot while
+	 * we are mounting
+	 */
+	mutex_lock(&bdev->bd_fsfreeze_mutex);
+	if (bdev->bd_fsfreeze_count > 0) {
+		mutex_unlock(&bdev->bd_fsfreeze_mutex);
+		warnf(fc, "%pg: Can't mount, blockdev is frozen", bdev);
+		return -EBUSY;
+	}
+
+	fc->sb_flags |= SB_NOSEC;
+	fc->sget_key = bdev;
+	s = sget_fc(fc, test_bdev_super_fc, set_bdev_super_fc);
+	mutex_unlock(&bdev->bd_fsfreeze_mutex);
+	if (IS_ERR(s))
+		return PTR_ERR(s);
+
+	if (s->s_root) {
+		/* Don't summarily change the RO/RW state. */
+		if ((fc->sb_flags ^ s->s_flags) & SB_RDONLY) {
+			warnf(fc, "%pg: Can't mount, would change RO state", bdev);
+			deactivate_locked_super(s);
+			blkdev_put(bdev, mode);
+			return -EBUSY;
+		}
+
+		/*
+		 * s_umount nests inside bd_mutex during
+		 * __invalidate_device().  blkdev_put() acquires
+		 * bd_mutex and can't be called under s_umount.  Drop
+		 * s_umount temporarily.  This is safe as we're
+		 * holding an active reference.
+		 */
+		up_write(&s->s_umount);
+		blkdev_put(bdev, mode);
+		down_write(&s->s_umount);
+	} else {
+		s->s_mode = mode;
+		snprintf(s->s_id, sizeof(s->s_id), "%pg", bdev);
+		sb_set_blocksize(s, block_size(bdev));
+		error = fill_super(s, fc);
+		if (error) {
+			deactivate_locked_super(s);
+			return error;
+		}
+
+		s->s_flags |= SB_ACTIVE;
+		bdev->bd_super = s;
+	}
+
+	BUG_ON(fc->root);
+	fc->root = dget(s->s_root);
+	return 0;
+}
+EXPORT_SYMBOL(get_tree_bdev);
 
 static int test_bdev_super(struct super_block *s, void *data)
 {

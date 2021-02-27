@@ -22,6 +22,7 @@ import os
 import pprint
 import random
 import re
+import stat
 import string
 import struct
 import subprocess
@@ -311,7 +312,11 @@ class DebugfsDir:
         for f in out.split():
             if f == "ports":
                 continue
+
             p = os.path.join(path, f)
+            if not os.stat(p).st_mode & stat.S_IRUSR:
+                continue
+
             if os.path.isfile(p):
                 _, out = cmd('cat %s/%s' % (path, f))
                 dfs[f] = out.strip()
@@ -925,6 +930,7 @@ try:
     start_test("Test disabling TC offloads is rejected while filters installed...")
     ret, _ = sim.set_ethtool_tc_offloads(False, fail=False)
     fail(ret == 0, "Driver should refuse to disable TC offloads with filters installed...")
+    sim.set_ethtool_tc_offloads(True)
 
     start_test("Test qdisc removal frees things...")
     sim.tc_flush_filters()

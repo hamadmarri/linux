@@ -280,13 +280,12 @@ static struct sdei_event *sdei_event_create(u32 event_num,
 	return event;
 }
 
-static void sdei_event_destroy(struct sdei_event *event)
+static void sdei_event_destroy_llocked(struct sdei_event *event)
 {
 	lockdep_assert_held(&sdei_events_lock);
+	lockdep_assert_held(&sdei_list_lock);
 
-	spin_lock(&sdei_list_lock);
 	list_del(&event->list);
-	spin_unlock(&sdei_list_lock);
 
 	if (event->type == SDEI_EVENT_TYPE_SHARED)
 		kfree(event->registered);
@@ -294,6 +293,13 @@ static void sdei_event_destroy(struct sdei_event *event)
 		free_percpu(event->private_registered);
 
 	kfree(event);
+}
+
+static void sdei_event_destroy(struct sdei_event *event)
+{
+	spin_lock(&sdei_list_lock);
+	sdei_event_destroy_llocked(event);
+	spin_unlock(&sdei_list_lock);
 }
 
 static int sdei_api_get_version(u64 *version)
@@ -491,11 +497,6 @@ static int _sdei_event_unregister(struct sdei_event *event)
 {
 	lockdep_assert_held(&sdei_events_lock);
 
-	spin_lock(&sdei_list_lock);
-	event->reregister = false;
-	event->reenable = false;
-	spin_unlock(&sdei_list_lock);
-
 	if (event->type == SDEI_EVENT_TYPE_SHARED)
 		return sdei_api_event_unregister(event->event_num);
 
@@ -517,6 +518,11 @@ int sdei_event_unregister(u32 event_num)
 			err = -ENOENT;
 			break;
 		}
+
+		spin_lock(&sdei_list_lock);
+		event->reregister = false;
+		event->reenable = false;
+		spin_unlock(&sdei_list_lock);
 
 		err = _sdei_event_unregister(event);
 		if (err)
@@ -585,26 +591,15 @@ static int _sdei_event_register(struct sdei_event *event)
 
 	lockdep_assert_held(&sdei_events_lock);
 
-	spin_lock(&sdei_list_lock);
-	event->reregister = true;
-	spin_unlock(&sdei_list_lock);
-
 	if (event->type == SDEI_EVENT_TYPE_SHARED)
 		return sdei_api_event_register(event->event_num,
 					       sdei_entry_point,
 					       event->registered,
 					       SDEI_EVENT_REGISTER_RM_ANY, 0);
 
-
 	err = sdei_do_cross_call(_local_event_register, event);
-	if (err) {
-		spin_lock(&sdei_list_lock);
-		event->reregister = false;
-		event->reenable = false;
-		spin_unlock(&sdei_list_lock);
-
+	if (err)
 		sdei_do_cross_call(_local_event_unregister, event);
-	}
 
 	return err;
 }
@@ -632,8 +627,17 @@ int sdei_event_register(u32 event_num, sdei_event_callback *cb, void *arg)
 			break;
 		}
 
+		spin_lock(&sdei_list_lock);
+		event->reregister = true;
+		spin_unlock(&sdei_list_lock);
+
 		err = _sdei_event_register(event);
 		if (err) {
+			spin_lock(&sdei_list_lock);
+			event->reregister = false;
+			event->reenable = false;
+			spin_unlock(&sdei_list_lock);
+
 			sdei_event_destroy(event);
 			pr_warn("Failed to register event %u: %d\n", event_num,
 				err);
@@ -645,16 +649,17 @@ int sdei_event_register(u32 event_num, sdei_event_callback *cb, void *arg)
 }
 EXPORT_SYMBOL(sdei_event_register);
 
-static int sdei_reregister_event(struct sdei_event *event)
+static int sdei_reregister_event_llocked(struct sdei_event *event)
 {
 	int err;
 
 	lockdep_assert_held(&sdei_events_lock);
+	lockdep_assert_held(&sdei_list_lock);
 
 	err = _sdei_event_register(event);
 	if (err) {
 		pr_err("Failed to re-register event %u\n", event->event_num);
-		sdei_event_destroy(event);
+		sdei_event_destroy_llocked(event);
 		return err;
 	}
 
@@ -683,7 +688,7 @@ static int sdei_reregister_shared(void)
 			continue;
 
 		if (event->reregister) {
-			err = sdei_reregister_event(event);
+			err = sdei_reregister_event_llocked(event);
 			if (err)
 				break;
 		}
@@ -967,29 +972,29 @@ static int sdei_get_conduit(struct platform_device *pdev)
 	if (np) {
 		if (of_property_read_string(np, "method", &method)) {
 			pr_warn("missing \"method\" property\n");
-			return CONDUIT_INVALID;
+			return SMCCC_CONDUIT_NONE;
 		}
 
 		if (!strcmp("hvc", method)) {
 			sdei_firmware_call = &sdei_smccc_hvc;
-			return CONDUIT_HVC;
+			return SMCCC_CONDUIT_HVC;
 		} else if (!strcmp("smc", method)) {
 			sdei_firmware_call = &sdei_smccc_smc;
-			return CONDUIT_SMC;
+			return SMCCC_CONDUIT_SMC;
 		}
 
 		pr_warn("invalid \"method\" property: %s\n", method);
 	} else if (IS_ENABLED(CONFIG_ACPI) && !acpi_disabled) {
 		if (acpi_psci_use_hvc()) {
 			sdei_firmware_call = &sdei_smccc_hvc;
-			return CONDUIT_HVC;
+			return SMCCC_CONDUIT_HVC;
 		} else {
 			sdei_firmware_call = &sdei_smccc_smc;
-			return CONDUIT_SMC;
+			return SMCCC_CONDUIT_SMC;
 		}
 	}
 
-	return CONDUIT_INVALID;
+	return SMCCC_CONDUIT_NONE;
 }
 
 static int sdei_probe(struct platform_device *pdev)
@@ -1142,6 +1147,14 @@ int sdei_event_handler(struct pt_regs *regs,
 	mm_segment_t orig_addr_limit;
 	u32 event_num = arg->event_num;
 
+	/*
+	 * Save restore 'fs'.
+	 * The architecture's entry code save/restores 'fs' when taking an
+	 * exception from the kernel. This ensures addr_limit isn't inherited
+	 * if you interrupted something that allowed the uaccess routines to
+	 * access kernel memory.
+	 * Do the same here because this doesn't come via the same entry code.
+	*/
 	orig_addr_limit = get_fs();
 	set_fs(USER_DS);
 

@@ -20,6 +20,7 @@
 #include <linux/sunrpc/sched.h>
 #include <linux/sunrpc/gss_api.h>
 #include <linux/sunrpc/clnt.h>
+#include <trace/events/rpcgss.h>
 
 #if IS_ENABLED(CONFIG_SUNRPC_DEBUG)
 # define RPCDBG_FACILITY        RPCDBG_AUTH
@@ -36,6 +37,8 @@ gss_mech_free(struct gss_api_mech *gm)
 
 	for (i = 0; i < gm->gm_pf_num; i++) {
 		pf = &gm->gm_pfs[i];
+		if (pf->domain)
+			auth_domain_put(pf->domain);
 		kfree(pf->auth_domain_name);
 		pf->auth_domain_name = NULL;
 	}
@@ -58,6 +61,7 @@ make_auth_domain_name(char *name)
 static int
 gss_mech_svc_setup(struct gss_api_mech *gm)
 {
+	struct auth_domain *dom;
 	struct pf_desc *pf;
 	int i, status;
 
@@ -67,10 +71,19 @@ gss_mech_svc_setup(struct gss_api_mech *gm)
 		status = -ENOMEM;
 		if (pf->auth_domain_name == NULL)
 			goto out;
-		status = svcauth_gss_register_pseudoflavor(pf->pseudoflavor,
-							pf->auth_domain_name);
+		status = svcauth_gss_register_pseudoflavor(
+			pf->pseudoflavor, pf->auth_domain_name);
 		if (status)
 			goto out;
+		dom = auth_domain_lookup(pf->auth_domain_name, NULL);
+		if (!dom) {
+			/* Should be impossible */
+			status = -ENOMEM;
+			goto out;
+		}
+		/* we got an extra reference - drop it */
+		auth_domain_put(dom);
+		pf->domain = dom;
 	}
 	return 0;
 out:
@@ -158,7 +171,6 @@ struct gss_api_mech *gss_mech_get_by_OID(struct rpcsec_gss_oid *obj)
 
 	if (sprint_oid(obj->data, obj->len, buf, sizeof(buf)) < 0)
 		return NULL;
-	dprintk("RPC:       %s(%s)\n", __func__, buf);
 	request_module("rpc-auth-gss-%s", buf);
 
 	rcu_read_lock();
@@ -172,6 +184,8 @@ struct gss_api_mech *gss_mech_get_by_OID(struct rpcsec_gss_oid *obj)
 		}
 	}
 	rcu_read_unlock();
+	if (!gm)
+		trace_rpcgss_oid_to_mech(buf);
 	return gm;
 }
 

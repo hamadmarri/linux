@@ -753,8 +753,8 @@ in-kernel irqchip (GIC), and for in-kernel irqchip can tell the GIC to
 use PPIs designated for specific cpus.  The irq field is interpreted
 like this:
 
-  bits:  | 31 ... 24 | 23  ... 16 | 15    ...    0 |
-  field: | irq_type  | vcpu_index |     irq_id     |
+  bits:  |  31 ... 28  | 27 ... 24 | 23  ... 16 | 15 ... 0 |
+  field: | vcpu2_index | irq_type  | vcpu_index |  irq_id  |
 
 The irq_type field has the following values:
 - irq_type[0]: out-of-kernel GIC: irq_id 0 is IRQ, irq_id 1 is FIQ
@@ -765,6 +765,14 @@ The irq_type field has the following values:
 (The irq_id field thus corresponds nicely to the IRQ ID in the ARM GIC specs)
 
 In both cases, level is used to assert/deassert the line.
+
+When KVM_CAP_ARM_IRQ_LINE_LAYOUT_2 is supported, the target vcpu is
+identified as (256 * vcpu2_index + vcpu_index). Otherwise, vcpu2_index
+must be zero.
+
+Note that on arm/arm64, the KVM_CAP_IRQCHIP capability only conditions
+injection of interrupts for the in-kernel irqchip. KVM_IRQ_LINE can always
+be used for a userspace interrupt controller.
 
 struct kvm_irq_level {
 	union {
@@ -1884,9 +1892,11 @@ Type: vcpu ioctl
 Parameters: struct kvm_one_reg (in)
 Returns: 0 on success, negative value on failure
 Errors:
-  ENOENT:   no such register
-  EINVAL:   invalid register ID, or no such register
-  EPERM:    (arm64) register access not allowed before vcpu finalization
+  ENOENT   no such register
+  EINVAL   invalid register ID, or no such register or used with VMs in
+           protected virtualization mode on s390
+  EPERM    (arm64) register access not allowed before vcpu finalization
+
 (These error codes are indicative only: do not rely on a specific error
 code being returned in a specific situation.)
 
@@ -2277,9 +2287,11 @@ Type: vcpu ioctl
 Parameters: struct kvm_one_reg (in and out)
 Returns: 0 on success, negative value on failure
 Errors include:
-  ENOENT:   no such register
-  EINVAL:   invalid register ID, or no such register
-  EPERM:    (arm64) register access not allowed before vcpu finalization
+  ENOENT   no such register
+  EINVAL   invalid register ID, or no such register or used with VMs in
+           protected virtualization mode on s390
+  EPERM    (arm64) register access not allowed before vcpu finalization
+
 (These error codes are indicative only: do not rely on a specific error
 code being returned in a specific situation.)
 
@@ -4112,6 +4124,93 @@ Valid values for 'action':
 #define KVM_PMU_EVENT_DENY 1
 
 
+4.122 KVM_S390_NORMAL_RESET
+
+Capability: KVM_CAP_S390_VCPU_RESETS
+Architectures: s390
+Type: vcpu ioctl
+Parameters: none
+Returns: 0
+
+This ioctl resets VCPU registers and control structures according to
+the cpu reset definition in the POP (Principles Of Operation).
+
+4.123 KVM_S390_INITIAL_RESET
+
+Capability: none
+Architectures: s390
+Type: vcpu ioctl
+Parameters: none
+Returns: 0
+
+This ioctl resets VCPU registers and control structures according to
+the initial cpu reset definition in the POP. However, the cpu is not
+put into ESA mode. This reset is a superset of the normal reset.
+
+4.124 KVM_S390_CLEAR_RESET
+
+Capability: KVM_CAP_S390_VCPU_RESETS
+Architectures: s390
+Type: vcpu ioctl
+Parameters: none
+Returns: 0
+
+This ioctl resets VCPU registers and control structures according to
+the clear cpu reset definition in the POP. However, the cpu is not put
+into ESA mode. This reset is a superset of the initial reset.
+
+
+4.125 KVM_S390_PV_COMMAND
+-------------------------
+
+:Capability: KVM_CAP_S390_PROTECTED
+:Architectures: s390
+:Type: vm ioctl
+:Parameters: struct kvm_pv_cmd
+:Returns: 0 on success, < 0 on error
+
+::
+
+  struct kvm_pv_cmd {
+	__u32 cmd;	/* Command to be executed */
+	__u16 rc;	/* Ultravisor return code */
+	__u16 rrc;	/* Ultravisor return reason code */
+	__u64 data;	/* Data or address */
+	__u32 flags;    /* flags for future extensions. Must be 0 for now */
+	__u32 reserved[3];
+  };
+
+cmd values:
+
+KVM_PV_ENABLE
+  Allocate memory and register the VM with the Ultravisor, thereby
+  donating memory to the Ultravisor that will become inaccessible to
+  KVM. All existing CPUs are converted to protected ones. After this
+  command has succeeded, any CPU added via hotplug will become
+  protected during its creation as well.
+
+  Errors:
+    EINTR    an unmasked signal is pending
+
+KVM_PV_DISABLE
+
+  Deregister the VM from the Ultravisor and reclaim the memory that
+  had been donated to the Ultravisor, making it usable by the kernel
+  again.  All registered VCPUs are converted back to non-protected
+  ones.
+
+KVM_PV_VM_SET_SEC_PARMS
+  Pass the image header from VM memory to the Ultravisor in
+  preparation of image unpacking and verification.
+
+KVM_PV_VM_UNPACK
+  Unpack (protect and decrypt) a page of the encrypted boot image.
+
+KVM_PV_VM_VERIFY
+  Verify the integrity of the unpacked image. Only if this succeeds,
+  KVM is allowed to start protected VCPUs.
+
+
 5. The kvm_run structure
 ------------------------
 
@@ -5294,3 +5393,34 @@ Architectures: x86
 This capability indicates that KVM supports paravirtualized Hyper-V IPI send
 hypercalls:
 HvCallSendSyntheticClusterIpi, HvCallSendSyntheticClusterIpiEx.
+8.21 KVM_CAP_HYPERV_DIRECT_TLBFLUSH
+
+Architecture: x86
+
+This capability indicates that KVM running on top of Hyper-V hypervisor
+enables Direct TLB flush for its guests meaning that TLB flush
+hypercalls are handled by Level 0 hypervisor (Hyper-V) bypassing KVM.
+Due to the different ABI for hypercall parameters between Hyper-V and
+KVM, enabling this capability effectively disables all hypercall
+handling by KVM (as some KVM hypercall may be mistakenly treated as TLB
+flush hypercalls by Hyper-V) so userspace should disable KVM identification
+in CPUID and only exposes Hyper-V identification. In this case, guest
+thinks it's running on Hyper-V and only use Hyper-V hypercalls.
+
+8.22 KVM_CAP_S390_VCPU_RESETS
+
+Architectures: s390
+
+This capability indicates that the KVM_S390_NORMAL_RESET and
+KVM_S390_CLEAR_RESET ioctls are available.
+
+8.23 KVM_CAP_S390_PROTECTED
+
+Architecture: s390
+
+
+This capability indicates that the Ultravisor has been initialized and
+KVM can therefore start protected VMs.
+This capability governs the KVM_S390_PV_COMMAND ioctl and the
+KVM_MP_STATE_LOAD MP_STATE. KVM_SET_MP_STATE can fail for protected
+guests when the state change is invalid.

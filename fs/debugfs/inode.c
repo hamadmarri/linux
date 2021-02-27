@@ -26,6 +26,7 @@
 #include <linux/parser.h>
 #include <linux/magic.h>
 #include <linux/slab.h>
+#include <linux/security.h>
 
 #include "internal.h"
 
@@ -34,6 +35,32 @@
 static struct vfsmount *debugfs_mount;
 static int debugfs_mount_count;
 static bool debugfs_registered;
+
+/*
+ * Don't allow access attributes to be changed whilst the kernel is locked down
+ * so that we can use the file mode as part of a heuristic to determine whether
+ * to lock down individual files.
+ */
+static int debugfs_setattr(struct dentry *dentry, struct iattr *ia)
+{
+	int ret = security_locked_down(LOCKDOWN_DEBUGFS);
+
+	if (ret && (ia->ia_valid & (ATTR_MODE | ATTR_UID | ATTR_GID)))
+		return ret;
+	return simple_setattr(dentry, ia);
+}
+
+static const struct inode_operations debugfs_file_inode_operations = {
+	.setattr	= debugfs_setattr,
+};
+static const struct inode_operations debugfs_dir_inode_operations = {
+	.lookup		= simple_lookup,
+	.setattr	= debugfs_setattr,
+};
+static const struct inode_operations debugfs_symlink_inode_operations = {
+	.get_link	= simple_get_link,
+	.setattr	= debugfs_setattr,
+};
 
 static struct inode *debugfs_get_inode(struct super_block *sb)
 {
@@ -272,13 +299,9 @@ struct dentry *debugfs_lookup(const char *name, struct dentry *parent)
 	if (!parent)
 		parent = debugfs_mount->mnt_root;
 
-	dentry = lookup_one_len_unlocked(name, parent, strlen(name));
+	dentry = lookup_positive_unlocked(name, parent, strlen(name));
 	if (IS_ERR(dentry))
 		return NULL;
-	if (!d_really_is_positive(dentry)) {
-		dput(dentry);
-		return NULL;
-	}
 	return dentry;
 }
 EXPORT_SYMBOL_GPL(debugfs_lookup);
@@ -309,7 +332,10 @@ static struct dentry *start_creating(const char *name, struct dentry *parent)
 		parent = debugfs_mount->mnt_root;
 
 	inode_lock(d_inode(parent));
-	dentry = lookup_one_len(name, parent, strlen(name));
+	if (unlikely(IS_DEADDIR(d_inode(parent))))
+		dentry = ERR_PTR(-ENOENT);
+	else
+		dentry = lookup_one_len(name, parent, strlen(name));
 	if (!IS_ERR(dentry) && d_really_is_positive(dentry)) {
 		if (d_is_dir(dentry))
 			pr_err("Directory '%s' with parent '%s' already present!\n",
@@ -369,6 +395,7 @@ static struct dentry *__debugfs_create_file(const char *name, umode_t mode,
 	inode->i_mode = mode;
 	inode->i_private = data;
 
+	inode->i_op = &debugfs_file_inode_operations;
 	inode->i_fop = proxy_fops;
 	dentry->d_fsdata = (void *)((unsigned long)real_fops |
 				DEBUGFS_FSDATA_IS_REAL_FOPS_BIT);
@@ -532,7 +559,7 @@ struct dentry *debugfs_create_dir(const char *name, struct dentry *parent)
 	}
 
 	inode->i_mode = S_IFDIR | S_IRWXU | S_IRUGO | S_IXUGO;
-	inode->i_op = &simple_dir_inode_operations;
+	inode->i_op = &debugfs_dir_inode_operations;
 	inode->i_fop = &simple_dir_operations;
 
 	/* directory inodes start off with i_nlink == 2 (for "." entry) */
@@ -632,7 +659,7 @@ struct dentry *debugfs_create_symlink(const char *name, struct dentry *parent,
 		return failed_creating(dentry);
 	}
 	inode->i_mode = S_IFLNK | S_IRWXUGO;
-	inode->i_op = &simple_symlink_inode_operations;
+	inode->i_op = &debugfs_symlink_inode_operations;
 	inode->i_link = link;
 	d_instantiate(dentry, inode);
 	return end_creating(dentry);
@@ -657,62 +684,15 @@ static void __debugfs_file_removed(struct dentry *dentry)
 		wait_for_completion(&fsd->active_users_drained);
 }
 
-static int __debugfs_remove(struct dentry *dentry, struct dentry *parent)
+static void remove_one(struct dentry *victim)
 {
-	int ret = 0;
-
-	if (simple_positive(dentry)) {
-		dget(dentry);
-		if (d_is_dir(dentry)) {
-			ret = simple_rmdir(d_inode(parent), dentry);
-			if (!ret)
-				fsnotify_rmdir(d_inode(parent), dentry);
-		} else {
-			simple_unlink(d_inode(parent), dentry);
-			fsnotify_unlink(d_inode(parent), dentry);
-		}
-		if (!ret)
-			d_delete(dentry);
-		if (d_is_reg(dentry))
-			__debugfs_file_removed(dentry);
-		dput(dentry);
-	}
-	return ret;
+        if (d_is_reg(victim))
+		__debugfs_file_removed(victim);
+	simple_release_fs(&debugfs_mount, &debugfs_mount_count);
 }
 
 /**
- * debugfs_remove - removes a file or directory from the debugfs filesystem
- * @dentry: a pointer to a the dentry of the file or directory to be
- *          removed.  If this parameter is NULL or an error value, nothing
- *          will be done.
- *
- * This function removes a file or directory in debugfs that was previously
- * created with a call to another debugfs function (like
- * debugfs_create_file() or variants thereof.)
- *
- * This function is required to be called in order for the file to be
- * removed, no automatic cleanup of files will happen when a module is
- * removed, you are responsible here.
- */
-void debugfs_remove(struct dentry *dentry)
-{
-	struct dentry *parent;
-	int ret;
-
-	if (IS_ERR_OR_NULL(dentry))
-		return;
-
-	parent = dentry->d_parent;
-	inode_lock(d_inode(parent));
-	ret = __debugfs_remove(dentry, parent);
-	inode_unlock(d_inode(parent));
-	if (!ret)
-		simple_release_fs(&debugfs_mount, &debugfs_mount_count);
-}
-EXPORT_SYMBOL_GPL(debugfs_remove);
-
-/**
- * debugfs_remove_recursive - recursively removes a directory
+ * debugfs_remove - recursively removes a directory
  * @dentry: a pointer to a the dentry of the directory to be removed.  If this
  *          parameter is NULL or an error value, nothing will be done.
  *
@@ -724,65 +704,16 @@ EXPORT_SYMBOL_GPL(debugfs_remove);
  * removed, no automatic cleanup of files will happen when a module is
  * removed, you are responsible here.
  */
-void debugfs_remove_recursive(struct dentry *dentry)
+void debugfs_remove(struct dentry *dentry)
 {
-	struct dentry *child, *parent;
-
 	if (IS_ERR_OR_NULL(dentry))
 		return;
 
-	parent = dentry;
- down:
-	inode_lock(d_inode(parent));
- loop:
-	/*
-	 * The parent->d_subdirs is protected by the d_lock. Outside that
-	 * lock, the child can be unlinked and set to be freed which can
-	 * use the d_u.d_child as the rcu head and corrupt this list.
-	 */
-	spin_lock(&parent->d_lock);
-	list_for_each_entry(child, &parent->d_subdirs, d_child) {
-		if (!simple_positive(child))
-			continue;
-
-		/* perhaps simple_empty(child) makes more sense */
-		if (!list_empty(&child->d_subdirs)) {
-			spin_unlock(&parent->d_lock);
-			inode_unlock(d_inode(parent));
-			parent = child;
-			goto down;
-		}
-
-		spin_unlock(&parent->d_lock);
-
-		if (!__debugfs_remove(child, parent))
-			simple_release_fs(&debugfs_mount, &debugfs_mount_count);
-
-		/*
-		 * The parent->d_lock protects agaist child from unlinking
-		 * from d_subdirs. When releasing the parent->d_lock we can
-		 * no longer trust that the next pointer is valid.
-		 * Restart the loop. We'll skip this one with the
-		 * simple_positive() check.
-		 */
-		goto loop;
-	}
-	spin_unlock(&parent->d_lock);
-
-	inode_unlock(d_inode(parent));
-	child = parent;
-	parent = parent->d_parent;
-	inode_lock(d_inode(parent));
-
-	if (child != dentry)
-		/* go up */
-		goto loop;
-
-	if (!__debugfs_remove(child, parent))
-		simple_release_fs(&debugfs_mount, &debugfs_mount_count);
-	inode_unlock(d_inode(parent));
+	simple_pin_fs(&debug_fs_type, &debugfs_mount, &debugfs_mount_count);
+	simple_recursive_removal(dentry, remove_one);
+	simple_release_fs(&debugfs_mount, &debugfs_mount_count);
 }
-EXPORT_SYMBOL_GPL(debugfs_remove_recursive);
+EXPORT_SYMBOL_GPL(debugfs_remove);
 
 /**
  * debugfs_rename - rename a file/directory in the debugfs filesystem

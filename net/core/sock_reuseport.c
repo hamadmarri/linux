@@ -112,6 +112,7 @@ static struct sock_reuseport *reuseport_grow(struct sock_reuseport *reuse)
 	more_reuse->prog = reuse->prog;
 	more_reuse->reuseport_id = reuse->reuseport_id;
 	more_reuse->bind_inany = reuse->bind_inany;
+	more_reuse->has_conns = reuse->has_conns;
 
 	memcpy(more_reuse->socks, reuse->socks,
 	       reuse->num_socks * sizeof(struct sock *));
@@ -301,7 +302,7 @@ select_by_hash:
 			i = j = reciprocal_scale(hash, socks);
 			while (reuse->socks[i]->sk_state == TCP_ESTABLISHED) {
 				i++;
-				if (i >= reuse->num_socks)
+				if (i >= socks)
 					i = 0;
 				if (i == j)
 					goto out;
@@ -356,8 +357,8 @@ int reuseport_detach_prog(struct sock *sk)
 	spin_lock_bh(&reuseport_lock);
 	reuse = rcu_dereference_protected(sk->sk_reuseport_cb,
 					  lockdep_is_held(&reuseport_lock));
-	rcu_swap_protected(reuse->prog, old_prog,
-			   lockdep_is_held(&reuseport_lock));
+	old_prog = rcu_replace_pointer(reuse->prog, old_prog,
+				       lockdep_is_held(&reuseport_lock));
 	spin_unlock_bh(&reuseport_lock);
 
 	if (!old_prog)

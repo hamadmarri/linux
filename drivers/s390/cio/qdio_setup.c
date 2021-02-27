@@ -113,7 +113,7 @@ static void set_impl_params(struct qdio_irq *irq_ptr,
 	irq_ptr->qib.pfmt = qib_param_field_format;
 	if (qib_param_field)
 		memcpy(irq_ptr->qib.parm, qib_param_field,
-		       QDIO_MAX_BUFFERS_PER_Q);
+		       sizeof(irq_ptr->qib.parm));
 
 	if (!input_slib_elements)
 		goto output;
@@ -248,7 +248,6 @@ static void setup_queues(struct qdio_irq *irq_ptr,
 		output_sbal_state_array += QDIO_MAX_BUFFERS_PER_Q;
 
 		q->is_input_q = 0;
-		q->u.out.scan_threshold = qdio_init->scan_threshold;
 		setup_storage_lists(q, irq_ptr, output_sbal_array, i);
 		output_sbal_array += QDIO_MAX_BUFFERS_PER_Q;
 
@@ -474,11 +473,11 @@ int qdio_setup_irq(struct qdio_initialize *init_data)
 	irq_ptr->nr_input_qs = init_data->no_input_qs;
 	irq_ptr->nr_output_qs = init_data->no_output_qs;
 	irq_ptr->cdev = init_data->cdev;
+	irq_ptr->scan_threshold = init_data->scan_threshold;
 	ccw_device_get_schid(irq_ptr->cdev, &irq_ptr->schid);
 	setup_queues(irq_ptr, init_data);
 
 	setup_qib(irq_ptr, init_data);
-	qdio_setup_thinint(irq_ptr);
 	set_impl_params(irq_ptr, init_data->qib_param_field_format,
 			init_data->qib_param_field,
 			init_data->input_slib_elements,
@@ -488,6 +487,12 @@ int qdio_setup_irq(struct qdio_initialize *init_data)
 	setup_qdr(irq_ptr, init_data);
 
 	/* qdr, qib, sls, slsbs, slibs, sbales are filled now */
+
+	/* set our IRQ handler */
+	spin_lock_irq(get_ccwdev_lock(irq_ptr->cdev));
+	irq_ptr->orig_handler = irq_ptr->cdev->handler;
+	irq_ptr->cdev->handler = qdio_int_handler;
+	spin_unlock_irq(get_ccwdev_lock(irq_ptr->cdev));
 
 	/* get qdio commands */
 	ciw = ccw_device_get_ciw(init_data->cdev, CIW_TYPE_EQUEUE);
@@ -504,12 +509,18 @@ int qdio_setup_irq(struct qdio_initialize *init_data)
 	}
 	irq_ptr->aqueue = *ciw;
 
-	/* set new interrupt handler */
-	spin_lock_irq(get_ccwdev_lock(irq_ptr->cdev));
-	irq_ptr->orig_handler = init_data->cdev->handler;
-	init_data->cdev->handler = qdio_int_handler;
-	spin_unlock_irq(get_ccwdev_lock(irq_ptr->cdev));
 	return 0;
+}
+
+void qdio_shutdown_irq(struct qdio_irq *irq)
+{
+	struct ccw_device *cdev = irq->cdev;
+
+	/* restore IRQ handler */
+	spin_lock_irq(get_ccwdev_lock(cdev));
+	cdev->handler = irq->orig_handler;
+	cdev->private->intparm = 0;
+	spin_unlock_irq(get_ccwdev_lock(cdev));
 }
 
 void qdio_print_subchannel_info(struct qdio_irq *irq_ptr,

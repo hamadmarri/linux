@@ -12,6 +12,8 @@
 
 #ifdef CONFIG_PPC_PERF_CTRS
 #include <asm/perf_event_server.h>
+#else
+static inline bool is_sier_available(void) { return false; }
 #endif
 
 #ifdef CONFIG_FSL_EMB_PERF_EVENT
@@ -32,7 +34,7 @@
 	do {							\
 		(regs)->result = 0;				\
 		(regs)->nip = __ip;				\
-		(regs)->gpr[1] = current_stack_pointer();	\
+		(regs)->gpr[1] = current_stack_frame();		\
 		asm volatile("mfmsr %0" : "=r" ((regs)->msr));	\
 	} while (0)
 

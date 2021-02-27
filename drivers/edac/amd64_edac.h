@@ -120,6 +120,12 @@
 #define PCI_DEVICE_ID_AMD_17H_M10H_DF_F6 0x15ee
 #define PCI_DEVICE_ID_AMD_17H_M30H_DF_F0 0x1490
 #define PCI_DEVICE_ID_AMD_17H_M30H_DF_F6 0x1496
+#define PCI_DEVICE_ID_AMD_17H_M60H_DF_F0 0x1448
+#define PCI_DEVICE_ID_AMD_17H_M60H_DF_F6 0x144e
+#define PCI_DEVICE_ID_AMD_17H_M70H_DF_F0 0x1440
+#define PCI_DEVICE_ID_AMD_17H_M70H_DF_F6 0x1446
+#define PCI_DEVICE_ID_AMD_19H_DF_F0	0x1650
+#define PCI_DEVICE_ID_AMD_19H_DF_F6	0x1656
 
 /*
  * Function 1 - Address Map
@@ -169,7 +175,8 @@
 #define DCSM0				0x60
 #define DCSM1				0x160
 
-#define csrow_enabled(i, dct, pvt)	((pvt)->csels[(dct)].csbases[(i)] & DCSB_CS_ENABLE)
+#define csrow_enabled(i, dct, pvt)	((pvt)->csels[(dct)].csbases[(i)]     & DCSB_CS_ENABLE)
+#define csrow_sec_enabled(i, dct, pvt)	((pvt)->csels[(dct)].csbases_sec[(i)] & DCSB_CS_ENABLE)
 
 #define DRAM_CONTROL			0x78
 
@@ -259,7 +266,9 @@
 
 /* UMC CH register offsets */
 #define UMCCH_BASE_ADDR			0x0
+#define UMCCH_BASE_ADDR_SEC		0x10
 #define UMCCH_ADDR_MASK			0x20
+#define UMCCH_ADDR_MASK_SEC		0x28
 #define UMCCH_ADDR_CFG			0x30
 #define UMCCH_DIMM_CFG			0x80
 #define UMCCH_UMC_CFG			0x100
@@ -286,6 +295,9 @@ enum amd_families {
 	F17_CPUS,
 	F17_M10H_CPUS,
 	F17_M30H_CPUS,
+	F17_M60H_CPUS,
+	F17_M70H_CPUS,
+	F19_CPUS,
 	NUM_FAMILIES,
 };
 
@@ -312,9 +324,11 @@ struct dram_range {
 /* A DCT chip selects collection */
 struct chip_select {
 	u32 csbases[NUM_CHIPSELECTS];
+	u32 csbases_sec[NUM_CHIPSELECTS];
 	u8 b_cnt;
 
 	u32 csmasks[NUM_CHIPSELECTS];
+	u32 csmasks_sec[NUM_CHIPSELECTS];
 	u8 m_cnt;
 };
 
@@ -471,6 +485,8 @@ struct low_ops {
 struct amd64_family_type {
 	const char *ctl_name;
 	u16 f0_id, f1_id, f2_id, f6_id;
+	/* Maximum number of memory controllers per die/node. */
+	u8 max_mcs;
 	struct low_ops ops;
 };
 

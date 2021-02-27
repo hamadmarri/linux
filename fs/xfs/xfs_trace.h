@@ -23,6 +23,7 @@ struct xlog;
 struct xlog_ticket;
 struct xlog_recover;
 struct xlog_recover_item;
+struct xlog_rec_header;
 struct xfs_buf_log_format;
 struct xfs_inode_log_format;
 struct xfs_bmbt_irec;
@@ -30,6 +31,10 @@ struct xfs_btree_cur;
 struct xfs_refcount_irec;
 struct xfs_fsmap;
 struct xfs_rmap_irec;
+struct xfs_icreate_log;
+struct xfs_owner_info;
+struct xfs_trans_res;
+struct xfs_inobt_rec_incore;
 
 DECLARE_EVENT_CLASS(xfs_attr_list_class,
 	TP_PROTO(struct xfs_attr_list_context *ctx),
@@ -990,8 +995,6 @@ DECLARE_EVENT_CLASS(xfs_loggrant_class,
 DEFINE_EVENT(xfs_loggrant_class, name, \
 	TP_PROTO(struct xlog *log, struct xlog_ticket *tic), \
 	TP_ARGS(log, tic))
-DEFINE_LOGGRANT_EVENT(xfs_log_done_nonperm);
-DEFINE_LOGGRANT_EVENT(xfs_log_done_perm);
 DEFINE_LOGGRANT_EVENT(xfs_log_umount_write);
 DEFINE_LOGGRANT_EVENT(xfs_log_grant_sleep);
 DEFINE_LOGGRANT_EVENT(xfs_log_grant_wake);
@@ -1000,12 +1003,12 @@ DEFINE_LOGGRANT_EVENT(xfs_log_reserve);
 DEFINE_LOGGRANT_EVENT(xfs_log_reserve_exit);
 DEFINE_LOGGRANT_EVENT(xfs_log_regrant);
 DEFINE_LOGGRANT_EVENT(xfs_log_regrant_exit);
-DEFINE_LOGGRANT_EVENT(xfs_log_regrant_reserve_enter);
-DEFINE_LOGGRANT_EVENT(xfs_log_regrant_reserve_exit);
-DEFINE_LOGGRANT_EVENT(xfs_log_regrant_reserve_sub);
-DEFINE_LOGGRANT_EVENT(xfs_log_ungrant_enter);
-DEFINE_LOGGRANT_EVENT(xfs_log_ungrant_exit);
-DEFINE_LOGGRANT_EVENT(xfs_log_ungrant_sub);
+DEFINE_LOGGRANT_EVENT(xfs_log_ticket_regrant);
+DEFINE_LOGGRANT_EVENT(xfs_log_ticket_regrant_exit);
+DEFINE_LOGGRANT_EVENT(xfs_log_ticket_regrant_sub);
+DEFINE_LOGGRANT_EVENT(xfs_log_ticket_ungrant);
+DEFINE_LOGGRANT_EVENT(xfs_log_ticket_ungrant_sub);
+DEFINE_LOGGRANT_EVENT(xfs_log_ticket_ungrant_exit);
 
 DECLARE_EVENT_CLASS(xfs_log_item_class,
 	TP_PROTO(struct xfs_log_item *lip),
@@ -3573,6 +3576,56 @@ TRACE_EVENT(xfs_pwork_init,
 	TP_printk("dev %d:%d nr_threads %u pid %u",
 		  MAJOR(__entry->dev), MINOR(__entry->dev),
 		  __entry->nr_threads, __entry->pid)
+)
+
+DECLARE_EVENT_CLASS(xfs_kmem_class,
+	TP_PROTO(ssize_t size, int flags, unsigned long caller_ip),
+	TP_ARGS(size, flags, caller_ip),
+	TP_STRUCT__entry(
+		__field(ssize_t, size)
+		__field(int, flags)
+		__field(unsigned long, caller_ip)
+	),
+	TP_fast_assign(
+		__entry->size = size;
+		__entry->flags = flags;
+		__entry->caller_ip = caller_ip;
+	),
+	TP_printk("size %zd flags 0x%x caller %pS",
+		  __entry->size,
+		  __entry->flags,
+		  (char *)__entry->caller_ip)
+)
+
+#define DEFINE_KMEM_EVENT(name) \
+DEFINE_EVENT(xfs_kmem_class, name, \
+	TP_PROTO(ssize_t size, int flags, unsigned long caller_ip), \
+	TP_ARGS(size, flags, caller_ip))
+DEFINE_KMEM_EVENT(kmem_alloc);
+DEFINE_KMEM_EVENT(kmem_alloc_io);
+DEFINE_KMEM_EVENT(kmem_alloc_large);
+DEFINE_KMEM_EVENT(kmem_realloc);
+DEFINE_KMEM_EVENT(kmem_zone_alloc);
+
+TRACE_EVENT(xfs_check_new_dalign,
+	TP_PROTO(struct xfs_mount *mp, int new_dalign, xfs_ino_t calc_rootino),
+	TP_ARGS(mp, new_dalign, calc_rootino),
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__field(int, new_dalign)
+		__field(xfs_ino_t, sb_rootino)
+		__field(xfs_ino_t, calc_rootino)
+	),
+	TP_fast_assign(
+		__entry->dev = mp->m_super->s_dev;
+		__entry->new_dalign = new_dalign;
+		__entry->sb_rootino = mp->m_sb.sb_rootino;
+		__entry->calc_rootino = calc_rootino;
+	),
+	TP_printk("dev %d:%d new_dalign %d sb_rootino %llu calc_rootino %llu",
+		  MAJOR(__entry->dev), MINOR(__entry->dev),
+		  __entry->new_dalign, __entry->sb_rootino,
+		  __entry->calc_rootino)
 )
 
 #endif /* _TRACE_XFS_H */
