@@ -8947,7 +8947,6 @@ static unsigned int task_running_on_cpu(int cpu, struct task_struct *p)
 	return 0;
 }
 
-#if !defined(CONFIG_CACULE_RDB)
 /**
  * idle_cpu_without - would a given CPU be idle without p ?
  * @cpu: the processor on which idleness is tested.
@@ -8975,7 +8974,6 @@ static int idle_cpu_without(int cpu, struct task_struct *p)
 
 	return 1;
 }
-#endif
 
 /*
  * update_sg_wakeup_stats - Update sched_group's statistics for wakeup.
@@ -9244,6 +9242,21 @@ find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu)
 	return idlest;
 }
 
+static inline long adjust_numa_imbalance(int imbalance, int nr_running)
+{
+	unsigned int imbalance_min;
+
+	/*
+	 * Allow a small imbalance based on a simple pair of communicating
+	 * tasks that remain local when the source domain is almost idle.
+	 */
+	imbalance_min = 2;
+	if (nr_running <= imbalance_min)
+		return 0;
+
+	return imbalance;
+}
+
 #if !defined(CONFIG_CACULE_RDB)
 /**
  * update_sd_lb_stats - Update sched_domain's statistics for load balancing.
@@ -9327,21 +9340,6 @@ next_group:
 		WRITE_ONCE(rd->overutilized, SG_OVERUTILIZED);
 		trace_sched_overutilized_tp(rd, SG_OVERUTILIZED);
 	}
-}
-
-static inline long adjust_numa_imbalance(int imbalance, int nr_running)
-{
-	unsigned int imbalance_min;
-
-	/*
-	 * Allow a small imbalance based on a simple pair of communicating
-	 * tasks that remain local when the source domain is almost idle.
-	 */
-	imbalance_min = 2;
-	if (nr_running <= imbalance_min)
-		return 0;
-
-	return imbalance;
 }
 
 /**
