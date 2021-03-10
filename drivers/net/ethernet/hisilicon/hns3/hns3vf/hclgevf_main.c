@@ -1304,11 +1304,12 @@ static int hclgevf_set_vlan_filter(struct hnae3_handle *handle,
 	if (proto != htons(ETH_P_8021Q))
 		return -EPROTONOSUPPORT;
 
-	/* When device is resetting, firmware is unable to handle
-	 * mailbox. Just record the vlan id, and remove it after
+	/* When device is resetting or reset failed, firmware is unable to
+	 * handle mailbox. Just record the vlan id, and remove it after
 	 * reset finished.
 	 */
-	if (test_bit(HCLGEVF_STATE_RST_HANDLING, &hdev->state) && is_kill) {
+	if ((test_bit(HCLGEVF_STATE_RST_HANDLING, &hdev->state) ||
+	     test_bit(HCLGEVF_STATE_RST_FAIL, &hdev->state)) && is_kill) {
 		set_bit(vlan_id, hdev->vlan_del_fail_bmap);
 		return -EBUSY;
 	}
@@ -1505,6 +1506,11 @@ static int hclgevf_reset_prepare_wait(struct hclgevf_dev *hdev)
 	if (hdev->reset_type == HNAE3_VF_FUNC_RESET) {
 		ret = hclgevf_send_mbx_msg(hdev, HCLGE_MBX_RESET, 0, NULL,
 					   0, true, NULL, sizeof(u8));
+		if (ret) {
+			dev_err(&hdev->pdev->dev,
+				"failed to assert VF reset, ret = %d\n", ret);
+			return ret;
+		}
 		hdev->rst_stats.vf_func_rst_cnt++;
 	}
 
@@ -2124,49 +2130,50 @@ static int hclgevf_config_gro(struct hclgevf_dev *hdev, bool en)
 	return ret;
 }
 
-static int hclgevf_rss_init_hw(struct hclgevf_dev *hdev)
+static void hclgevf_rss_init_cfg(struct hclgevf_dev *hdev)
 {
 	struct hclgevf_rss_cfg *rss_cfg = &hdev->rss_cfg;
-	int ret;
+	struct hclgevf_rss_tuple_cfg *tuple_sets;
 	u32 i;
 
+	rss_cfg->hash_algo = HCLGEVF_RSS_HASH_ALGO_TOEPLITZ;
 	rss_cfg->rss_size = hdev->nic.kinfo.rss_size;
-
+	tuple_sets = &rss_cfg->rss_tuple_sets;
 	if (hdev->pdev->revision >= 0x21) {
 		rss_cfg->hash_algo = HCLGEVF_RSS_HASH_ALGO_SIMPLE;
 		memcpy(rss_cfg->rss_hash_key, hclgevf_hash_key,
 		       HCLGEVF_RSS_KEY_SIZE);
 
-		ret = hclgevf_set_rss_algo_key(hdev, rss_cfg->hash_algo,
-					       rss_cfg->rss_hash_key);
-		if (ret)
-			return ret;
-
-		rss_cfg->rss_tuple_sets.ipv4_tcp_en =
-					HCLGEVF_RSS_INPUT_TUPLE_OTHER;
-		rss_cfg->rss_tuple_sets.ipv4_udp_en =
-					HCLGEVF_RSS_INPUT_TUPLE_OTHER;
-		rss_cfg->rss_tuple_sets.ipv4_sctp_en =
-					HCLGEVF_RSS_INPUT_TUPLE_SCTP;
-		rss_cfg->rss_tuple_sets.ipv4_fragment_en =
-					HCLGEVF_RSS_INPUT_TUPLE_OTHER;
-		rss_cfg->rss_tuple_sets.ipv6_tcp_en =
-					HCLGEVF_RSS_INPUT_TUPLE_OTHER;
-		rss_cfg->rss_tuple_sets.ipv6_udp_en =
-					HCLGEVF_RSS_INPUT_TUPLE_OTHER;
-		rss_cfg->rss_tuple_sets.ipv6_sctp_en =
-					HCLGEVF_RSS_INPUT_TUPLE_SCTP;
-		rss_cfg->rss_tuple_sets.ipv6_fragment_en =
-					HCLGEVF_RSS_INPUT_TUPLE_OTHER;
-
-		ret = hclgevf_set_rss_input_tuple(hdev, rss_cfg);
-		if (ret)
-			return ret;
+		tuple_sets->ipv4_tcp_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
+		tuple_sets->ipv4_udp_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
+		tuple_sets->ipv4_sctp_en = HCLGEVF_RSS_INPUT_TUPLE_SCTP;
+		tuple_sets->ipv4_fragment_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
+		tuple_sets->ipv6_tcp_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
+		tuple_sets->ipv6_udp_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
+		tuple_sets->ipv6_sctp_en = HCLGEVF_RSS_INPUT_TUPLE_SCTP;
+		tuple_sets->ipv6_fragment_en = HCLGEVF_RSS_INPUT_TUPLE_OTHER;
 	}
 
 	/* Initialize RSS indirect table */
 	for (i = 0; i < HCLGEVF_RSS_IND_TBL_SIZE; i++)
 		rss_cfg->rss_indirection_tbl[i] = i % rss_cfg->rss_size;
+}
+
+static int hclgevf_rss_init_hw(struct hclgevf_dev *hdev)
+{
+	struct hclgevf_rss_cfg *rss_cfg = &hdev->rss_cfg;
+	int ret;
+
+	if (hdev->pdev->revision >= 0x21) {
+		ret = hclgevf_set_rss_algo_key(hdev, rss_cfg->hash_algo,
+					       rss_cfg->rss_hash_key);
+		if (ret)
+			return ret;
+
+		ret = hclgevf_set_rss_input_tuple(hdev, rss_cfg);
+		if (ret)
+			return ret;
+	}
 
 	ret = hclgevf_set_rss_indir_table(hdev);
 	if (ret)
@@ -2764,6 +2771,7 @@ static int hclgevf_init_hdev(struct hclgevf_dev *hdev)
 		goto err_config;
 
 	/* Initialize RSS for this VF */
+	hclgevf_rss_init_cfg(hdev);
 	ret = hclgevf_rss_init_hw(hdev);
 	if (ret) {
 		dev_err(&hdev->pdev->dev,
@@ -2802,6 +2810,9 @@ err_cmd_queue_init:
 static void hclgevf_uninit_hdev(struct hclgevf_dev *hdev)
 {
 	hclgevf_state_uninit(hdev);
+
+	hclgevf_send_mbx_msg(hdev, HCLGE_MBX_VF_UNINIT, 0, NULL, 0,
+			     false, NULL, 0);
 
 	if (test_bit(HCLGEVF_STATE_IRQ_INITED, &hdev->state)) {
 		hclgevf_misc_irq_uninit(hdev);
@@ -2932,6 +2943,8 @@ static int hclgevf_set_channels(struct hnae3_handle *handle, u32 new_tqps_num,
 
 	for (i = 0; i < HCLGEVF_RSS_IND_TBL_SIZE; i++)
 		rss_indir[i] = i % kinfo->rss_size;
+
+	hdev->rss_cfg.rss_size = kinfo->rss_size;
 
 	ret = hclgevf_set_rss(handle, rss_indir, NULL, 0);
 	if (ret)
@@ -3098,10 +3111,23 @@ void hclgevf_update_port_base_vlan_info(struct hclgevf_dev *hdev, u16 state,
 					u8 *port_base_vlan_info, u8 data_size)
 {
 	struct hnae3_handle *nic = &hdev->nic;
+	int ret;
 
 	rtnl_lock();
-	hclgevf_notify_client(hdev, HNAE3_DOWN_CLIENT);
-	rtnl_unlock();
+
+	if (test_bit(HCLGEVF_STATE_RST_HANDLING, &hdev->state) ||
+	    test_bit(HCLGEVF_STATE_RST_FAIL, &hdev->state)) {
+		dev_warn(&hdev->pdev->dev,
+			 "is resetting when updating port based vlan info\n");
+		rtnl_unlock();
+		return;
+	}
+
+	ret = hclgevf_notify_client(hdev, HNAE3_DOWN_CLIENT);
+	if (ret) {
+		rtnl_unlock();
+		return;
+	}
 
 	/* send msg to PF and wait update port based vlan info */
 	hclgevf_send_mbx_msg(hdev, HCLGE_MBX_SET_VLAN,
@@ -3114,7 +3140,6 @@ void hclgevf_update_port_base_vlan_info(struct hclgevf_dev *hdev, u16 state,
 	else
 		nic->port_base_vlan_state = HNAE3_PORT_BASE_VLAN_ENABLE;
 
-	rtnl_lock();
 	hclgevf_notify_client(hdev, HNAE3_UP_CLIENT);
 	rtnl_unlock();
 }

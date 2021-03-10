@@ -2081,8 +2081,6 @@ void mlx5_eswitch_disable(struct mlx5_eswitch *esw, bool clear_vf)
 	else if (esw->mode == MLX5_ESWITCH_OFFLOADS)
 		esw_offloads_disable(esw);
 
-	esw_destroy_tsar(esw);
-
 	old_mode = esw->mode;
 	esw->mode = MLX5_ESWITCH_NONE;
 
@@ -2092,6 +2090,8 @@ void mlx5_eswitch_disable(struct mlx5_eswitch *esw, bool clear_vf)
 		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_IB);
 		mlx5_reload_interface(esw->dev, MLX5_INTERFACE_PROTOCOL_ETH);
 	}
+	esw_destroy_tsar(esw);
+
 	if (clear_vf)
 		mlx5_eswitch_clear_vf_vports_info(esw);
 }
@@ -2515,12 +2515,15 @@ static u32 calculate_vports_min_rate_divider(struct mlx5_eswitch *esw)
 		max_guarantee = evport->info.min_rate;
 	}
 
-	return max_t(u32, max_guarantee / fw_max_bw_share, 1);
+	if (max_guarantee)
+		return max_t(u32, max_guarantee / fw_max_bw_share, 1);
+	return 0;
 }
 
-static int normalize_vports_min_rate(struct mlx5_eswitch *esw, u32 divider)
+static int normalize_vports_min_rate(struct mlx5_eswitch *esw)
 {
 	u32 fw_max_bw_share = MLX5_CAP_QOS(esw->dev, max_tsar_bw_share);
+	u32 divider = calculate_vports_min_rate_divider(esw);
 	struct mlx5_vport *evport;
 	u32 vport_max_rate;
 	u32 vport_min_rate;
@@ -2533,9 +2536,9 @@ static int normalize_vports_min_rate(struct mlx5_eswitch *esw, u32 divider)
 			continue;
 		vport_min_rate = evport->info.min_rate;
 		vport_max_rate = evport->info.max_rate;
-		bw_share = MLX5_MIN_BW_SHARE;
+		bw_share = 0;
 
-		if (vport_min_rate)
+		if (divider)
 			bw_share = MLX5_RATE_TO_BW_SHARE(vport_min_rate,
 							 divider,
 							 fw_max_bw_share);
@@ -2560,7 +2563,6 @@ int mlx5_eswitch_set_vport_rate(struct mlx5_eswitch *esw, u16 vport,
 	struct mlx5_vport *evport = mlx5_eswitch_get_vport(esw, vport);
 	u32 fw_max_bw_share;
 	u32 previous_min_rate;
-	u32 divider;
 	bool min_rate_supported;
 	bool max_rate_supported;
 	int err = 0;
@@ -2585,8 +2587,7 @@ int mlx5_eswitch_set_vport_rate(struct mlx5_eswitch *esw, u16 vport,
 
 	previous_min_rate = evport->info.min_rate;
 	evport->info.min_rate = min_rate;
-	divider = calculate_vports_min_rate_divider(esw);
-	err = normalize_vports_min_rate(esw, divider);
+	err = normalize_vports_min_rate(esw);
 	if (err) {
 		evport->info.min_rate = previous_min_rate;
 		goto unlock;
@@ -2614,8 +2615,12 @@ static int mlx5_eswitch_query_vport_drop_stats(struct mlx5_core_dev *dev,
 	u64 bytes = 0;
 	int err = 0;
 
-	if (!vport->enabled || esw->mode != MLX5_ESWITCH_LEGACY)
+	if (esw->mode != MLX5_ESWITCH_LEGACY)
 		return 0;
+
+	mutex_lock(&esw->state_lock);
+	if (!vport->enabled)
+		goto unlock;
 
 	if (vport->egress.legacy.drop_counter)
 		mlx5_fc_query(dev, vport->egress.legacy.drop_counter,
@@ -2627,20 +2632,22 @@ static int mlx5_eswitch_query_vport_drop_stats(struct mlx5_core_dev *dev,
 
 	if (!MLX5_CAP_GEN(dev, receive_discard_vport_down) &&
 	    !MLX5_CAP_GEN(dev, transmit_discard_vport_down))
-		return 0;
+		goto unlock;
 
 	err = mlx5_query_vport_down_stats(dev, vport->vport, 1,
 					  &rx_discard_vport_down,
 					  &tx_discard_vport_down);
 	if (err)
-		return err;
+		goto unlock;
 
 	if (MLX5_CAP_GEN(dev, receive_discard_vport_down))
 		stats->rx_dropped += rx_discard_vport_down;
 	if (MLX5_CAP_GEN(dev, transmit_discard_vport_down))
 		stats->tx_dropped += tx_discard_vport_down;
 
-	return 0;
+unlock:
+	mutex_unlock(&esw->state_lock);
+	return err;
 }
 
 int mlx5_eswitch_get_vport_stats(struct mlx5_eswitch *esw,

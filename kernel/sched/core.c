@@ -3092,7 +3092,9 @@ void wake_up_new_task(struct task_struct *p)
 	post_init_entity_util_avg(p);
 
 #ifdef CONFIG_CACULE_SCHED
-	if (!cacule_harsh_mode)
+	if (cacule_harsh_mode)
+		p->se.cacule_node.cacule_start_time = p->start_time;
+	else
 		p->se.cacule_node.cacule_start_time = sched_clock();
 #endif
 
@@ -5774,12 +5776,8 @@ static void do_sched_yield(void)
 	schedstat_inc(rq->yld_count);
 	current->sched_class->yield_task(rq);
 
-	/*
-	 * Since we are going to call schedule() anyway, there's
-	 * no need to preempt or enable interrupts:
-	 */
 	preempt_disable();
-	rq_unlock(rq, &rf);
+	rq_unlock_irq(rq, &rf);
 	sched_preempt_enable_no_resched();
 
 	schedule();
@@ -6741,11 +6739,11 @@ void __init sched_init(void)
 	int i;
 
 #if defined(CONFIG_CACULE_SCHED) && !defined(CONFIG_CACULE_RDB)
-	printk(KERN_INFO "CacULE CPU scheduler v5.4 by Hamad Al Marri.");
+	printk(KERN_INFO "CacULE CPU scheduler v5.3-lp152.66 by Hamad Al Marri.");
 #endif
 
 #ifdef CONFIG_CACULE_RDB
-	printk(KERN_INFO "CacULE CPU scheduler (RDB) v5.4 by Hamad Al Marri.");
+	printk(KERN_INFO "CacULE CPU scheduler (RDB) v5.3-lp152.66 by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();

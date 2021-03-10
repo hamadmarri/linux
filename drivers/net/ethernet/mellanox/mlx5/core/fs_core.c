@@ -325,14 +325,10 @@ static void tree_put_node(struct fs_node *node, bool locked)
 		if (parent_node) {
 			down_write_ref_node(parent_node, locked);
 			list_del_init(&node->list);
-			if (node->del_sw_func)
-				node->del_sw_func(node);
-			up_write_ref_node(parent_node, locked);
-		} else if (node->del_sw_func) {
-			node->del_sw_func(node);
-		} else {
-			kfree(node);
 		}
+		node->del_sw_func(node);
+		if (parent_node)
+			up_write_ref_node(parent_node, locked);
 		node = NULL;
 	}
 	if (!node && parent_node)
@@ -494,6 +490,13 @@ static void del_sw_hw_rule(struct fs_node *node)
 			BIT(MLX5_SET_FTE_MODIFY_ENABLE_MASK_ACTION) |
 			BIT(MLX5_SET_FTE_MODIFY_ENABLE_MASK_FLOW_COUNTERS);
 		fte->action.action &= ~MLX5_FLOW_CONTEXT_ACTION_COUNT;
+		goto out;
+	}
+
+	if (rule->dest_attr.type == MLX5_FLOW_DESTINATION_TYPE_PORT &&
+	    --fte->dests_size) {
+		fte->modify_mask |= BIT(MLX5_SET_FTE_MODIFY_ENABLE_MASK_ACTION);
+		fte->action.action &= ~MLX5_FLOW_CONTEXT_ACTION_ALLOW;
 		goto out;
 	}
 
@@ -1083,6 +1086,7 @@ static struct mlx5_flow_table *__mlx5_create_flow_table(struct mlx5_flow_namespa
 destroy_ft:
 	root->cmds->destroy_flow_table(root, ft);
 free_ft:
+	rhltable_destroy(&ft->fgs_hash);
 	kfree(ft);
 unlock_root:
 	mutex_unlock(&root->chain_lock);
@@ -1955,10 +1959,11 @@ void mlx5_del_flow_rules(struct mlx5_flow_handle *handle)
 	down_write_ref_node(&fte->node, false);
 	for (i = handle->num_rules - 1; i >= 0; i--)
 		tree_remove_node(&handle->rule[i]->node, true);
-	if (fte->modify_mask && fte->dests_size) {
-		modify_fte(fte);
+	if (fte->dests_size) {
+		if (fte->modify_mask)
+			modify_fte(fte);
 		up_write_ref_node(&fte->node, false);
-	} else {
+	} else if (list_empty(&fte->node.children)) {
 		del_hw_fte(&fte->node);
 		/* Avoid double call to del_hw_fte */
 		fte->node.del_hw_func = NULL;
@@ -2340,6 +2345,17 @@ static int init_root_tree(struct mlx5_flow_steering *steering,
 	return 0;
 }
 
+static void del_sw_root_ns(struct fs_node *node)
+{
+	struct mlx5_flow_root_namespace *root_ns;
+	struct mlx5_flow_namespace *ns;
+
+	fs_get_obj(ns, node);
+	root_ns = container_of(ns, struct mlx5_flow_root_namespace, ns);
+	mutex_destroy(&root_ns->chain_lock);
+	kfree(node);
+}
+
 static struct mlx5_flow_root_namespace
 *create_root_ns(struct mlx5_flow_steering *steering,
 		enum fs_flow_table_type table_type)
@@ -2366,7 +2382,7 @@ static struct mlx5_flow_root_namespace
 	ns = &root_ns->ns;
 	fs_init_namespace(ns);
 	mutex_init(&root_ns->chain_lock);
-	tree_init_node(&ns->node, NULL, NULL);
+	tree_init_node(&ns->node, NULL, del_sw_root_ns);
 	tree_add_node(&ns->node, NULL);
 
 	return root_ns;

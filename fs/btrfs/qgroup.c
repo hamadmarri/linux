@@ -3084,6 +3084,12 @@ out:
 	return ret;
 }
 
+static bool rescan_should_stop(struct btrfs_fs_info *fs_info)
+{
+	return btrfs_fs_closing(fs_info) ||
+		test_bit(BTRFS_FS_STATE_REMOUNTING, &fs_info->fs_state);
+}
+
 static void btrfs_qgroup_rescan_worker(struct btrfs_work *work)
 {
 	struct btrfs_fs_info *fs_info = container_of(work, struct btrfs_fs_info,
@@ -3092,6 +3098,7 @@ static void btrfs_qgroup_rescan_worker(struct btrfs_work *work)
 	struct btrfs_trans_handle *trans = NULL;
 	int err = -ENOMEM;
 	int ret = 0;
+	bool stopped = false;
 
 	path = btrfs_alloc_path();
 	if (!path)
@@ -3104,7 +3111,7 @@ static void btrfs_qgroup_rescan_worker(struct btrfs_work *work)
 	path->skip_locking = 1;
 
 	err = 0;
-	while (!err && !btrfs_fs_closing(fs_info)) {
+	while (!err && !(stopped = rescan_should_stop(fs_info))) {
 		trans = btrfs_start_transaction(fs_info->fs_root, 0);
 		if (IS_ERR(trans)) {
 			err = PTR_ERR(trans);
@@ -3147,7 +3154,7 @@ out:
 	}
 
 	mutex_lock(&fs_info->qgroup_rescan_lock);
-	if (!btrfs_fs_closing(fs_info))
+	if (!stopped)
 		fs_info->qgroup_flags &= ~BTRFS_QGROUP_STATUS_FLAG_RESCAN;
 	if (trans) {
 		ret = update_qgroup_status_item(trans);
@@ -3166,7 +3173,7 @@ out:
 
 	btrfs_end_transaction(trans);
 
-	if (btrfs_fs_closing(fs_info)) {
+	if (stopped) {
 		btrfs_info(fs_info, "qgroup scan paused");
 	} else if (err >= 0) {
 		btrfs_info(fs_info, "qgroup scan completed%s",
@@ -3435,37 +3442,19 @@ static int try_flush_qgroup(struct btrfs_root *root)
 {
 	struct btrfs_trans_handle *trans;
 	int ret;
-	bool can_commit = true;
 
-	/*
-	 * If current process holds a transaction, we shouldn't flush, as we
-	 * assume all space reservation happens before a transaction handle is
-	 * held.
-	 *
-	 * But there are cases like btrfs_delayed_item_reserve_metadata() where
-	 * we try to reserve space with one transction handle already held.
-	 * In that case we can't commit transaction, but at least try to end it
-	 * and hope the started data writes can free some space.
-	 */
-	if (current->journal_info &&
-	    current->journal_info != BTRFS_SEND_TRANS_STUB)
-		can_commit = false;
+	/* Can't hold an open transaction or we run the risk of deadlocking. */
+	ASSERT(current->journal_info == NULL ||
+	       current->journal_info == BTRFS_SEND_TRANS_STUB);
+	if (WARN_ON(current->journal_info &&
+		     current->journal_info != BTRFS_SEND_TRANS_STUB))
+		return 0;
 
 	/*
 	 * We don't want to run flush again and again, so if there is a running
 	 * one, we won't try to start a new flush, but exit directly.
 	 */
 	if (test_and_set_bit(BTRFS_ROOT_QGROUP_FLUSHING, &root->state)) {
-		/*
-		 * We are already holding a transaction, thus we can block other
-		 * threads from flushing.  So exit right now. This increases
-		 * the chance of EDQUOT for heavy load and near limit cases.
-		 * But we can argue that if we're already near limit, EDQUOT is
-		 * unavoidable anyway.
-		 */
-		if (!can_commit)
-			return 0;
-
 		wait_event(root->qgroup_flush_wait,
 			!test_bit(BTRFS_ROOT_QGROUP_FLUSHING, &root->state));
 		return 0;
@@ -3482,10 +3471,7 @@ static int try_flush_qgroup(struct btrfs_root *root)
 		goto out;
 	}
 
-	if (can_commit)
-		ret = btrfs_commit_transaction(trans);
-	else
-		ret = btrfs_end_transaction(trans);
+	ret = btrfs_commit_transaction(trans);
 out:
 	clear_bit(BTRFS_ROOT_QGROUP_FLUSHING, &root->state);
 	wake_up(&root->qgroup_flush_wait);
@@ -3742,8 +3728,8 @@ static int sub_root_meta_rsv(struct btrfs_root *root, int num_bytes,
 	return num_bytes;
 }
 
-static int qgroup_reserve_meta(struct btrfs_root *root, int num_bytes,
-				enum btrfs_qgroup_rsv_type type, bool enforce)
+int qgroup_reserve_meta(struct btrfs_root *root, int num_bytes,
+			enum btrfs_qgroup_rsv_type type, bool enforce)
 {
 	struct btrfs_fs_info *fs_info = root->fs_info;
 	int ret;
