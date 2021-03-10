@@ -11340,14 +11340,18 @@ active_balance(struct rq *rq)
 
 void trigger_load_balance(struct rq *rq)
 {
+#if !defined(CONFIG_HZ_350)
 	unsigned long interval = 3UL;
+#endif
 
 	/* Don't need to rebalance while attached to NULL domain */
 	if (unlikely(on_null_domain(rq)))
 		return;
 
+#if !defined(CONFIG_HZ_350)
 	if (time_before(jiffies, rq->next_balance))
 		return;
+#endif
 
 	if (rq->idle_balance) {
 		idle_try_pull_any(&rq->cfs);
@@ -11355,9 +11359,11 @@ void trigger_load_balance(struct rq *rq)
 	else {
 		active_balance(rq);
 
+#if !defined(CONFIG_HZ_350)
 		/* scale ms to jiffies */
 		interval = msecs_to_jiffies(interval);
 		rq->next_balance = jiffies + interval;
+#endif
 	}
 }
 #endif

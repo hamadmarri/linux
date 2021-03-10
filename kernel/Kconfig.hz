@@ -41,6 +41,12 @@ choice
 	 NTSC frame rates for video and multimedia work.
 
 
+	config HZ_350
+		bool "350 HZ"
+	help
+	 350 Hz.
+
+
 	config HZ_500
 		bool "500 HZ"
 	help
@@ -60,6 +66,7 @@ config HZ
 	default 100 if HZ_100
 	default 250 if HZ_250
 	default 300 if HZ_300
+	default 350 if HZ_350
 	default 500 if HZ_500
 	default 1000 if HZ_1000
 
