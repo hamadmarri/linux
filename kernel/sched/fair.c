@@ -610,7 +610,7 @@ entity_before_cached(u64 now, unsigned int score_curr, struct cacule_node *se)
 	score_se	= calc_interactivity(now, se);
 	diff		= score_se - score_curr;
 
-	if (diff < 0)
+	if (diff <= 0)
 		return 1;
 
 	return -1;
@@ -645,7 +645,7 @@ entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 {
 	struct cacule_node *se = &(_se->cacule_node);
-	struct cacule_node *iter, *prev = NULL;
+	struct cacule_node *iter, *next = NULL;
 	u64 now = sched_clock();
 	unsigned int score_se = calc_interactivity(now, se);
 
@@ -654,39 +654,42 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 
 	if (likely(cfs_rq->head)) {
 
-		// start from head
-		iter = cfs_rq->head;
+		// start from tail
+		iter = cfs_rq->tail;
 
-		// does iter have higher IS than se?
-		while (iter && entity_before_cached(now, score_se, iter) == 1) {
-			prev = iter;
-			iter = iter->next;
+		// does se have higher IS than iter?
+		while (iter && entity_before_cached(now, score_se, iter) == -1) {
+			next = iter;
+			iter = iter->prev;
 		}
 
-		// if iter == NULL, insert se at the end
-		if (iter == NULL) {
-			prev->next	= se;
-			se->prev	= prev;
-		}
-		// else if not head, insert se before iter
-		else if (iter != cfs_rq->head) {
-			se->next	= iter;
-			se->prev	= prev;
+		// se in tail position
+		if (iter == cfs_rq->tail) {
+			cfs_rq->tail->next	= se;
+			se->prev		= cfs_rq->tail;
 
-			iter->prev	= se;
-			prev->next	= se;
+			cfs_rq->tail		= se;
 		}
-		// else iter == head, insert se at head
+		// else if not head no tail, insert se after iter
+		else if (iter) {
+			se->next	= next;
+			se->prev	= iter;
+
+			iter->next	= se;
+			next->prev	= se;
+		}
+		// insert se at head
 		else {
 			se->next		= cfs_rq->head;
 			cfs_rq->head->prev	= se;
 
 			// lastly reset the head
-			cfs_rq->head = se;
+			cfs_rq->head		= se;
 		}
 	} else {
 		// if empty rq
 		cfs_rq->head = se;
+		cfs_rq->tail = se;
 	}
 }
 
@@ -695,8 +698,9 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 	struct cacule_node *se = &(_se->cacule_node);
 
 	// if only one se in rq
-	if (cfs_rq->head->next == NULL) {
+	if (cfs_rq->head == cfs_rq->tail) {
 		cfs_rq->head = NULL;
+		cfs_rq->tail = NULL;
 
 #ifdef CONFIG_CACULE_RDB
 	WRITE_ONCE(cfs_rq->IS_head, 0);
@@ -706,6 +710,10 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 		// if it is the head
 		cfs_rq->head		= cfs_rq->head->next;
 		cfs_rq->head->prev	= NULL;
+	} else if (se == cfs_rq->tail) {
+		// if it is the tail
+		cfs_rq->tail		= cfs_rq->tail->prev;
+		cfs_rq->tail->next	= NULL;
 	} else {
 		// if in the middle
 		struct cacule_node *prev = se->prev;
@@ -11688,6 +11696,7 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 
 #ifdef CONFIG_CACULE_SCHED
 	cfs_rq->head = NULL;
+	cfs_rq->tail = NULL;
 #endif
 }
 
