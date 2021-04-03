@@ -92,7 +92,15 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
 unsigned int sysctl_sched_wakeup_granularity			= 2500000UL;
 static unsigned int normalized_sysctl_sched_wakeup_granularity	= 2500000UL;
 
-unsigned int sysctl_sched_migration_cost	= 100000UL;
+#ifdef CONFIG_CACULE_RDB
+#ifdef CONFIG_SCHED_DEBUG
+const_debug unsigned int sysctl_sched_migration_cost   = 100000UL;
+#else
+unsigned int sysctl_sched_migration_cost	       = 100000UL;
+#endif
+#else
+const_debug unsigned int sysctl_sched_migration_cost   = 500000UL;
+#endif
 
 #ifdef CONFIG_SMP
 /*
@@ -7759,6 +7767,7 @@ struct lb_env {
 	struct list_head	tasks;
 };
 
+#ifdef CONFIG_CACULE_RDB
 static int task_hot(struct rq *src_rq)
 {
 	s64 delta;
@@ -7785,8 +7794,7 @@ static int task_hot(struct rq *src_rq)
 
 	return delta < (s64)sysctl_sched_migration_cost;
 }
-
-#if !defined(CONFIG_CACULE_RDB)
+#else
 /*
  * Is this task likely cache-hot:
  */
@@ -11331,14 +11339,15 @@ again:
 		if (src_cpu == dst_cpu)
 			continue;
 
-		if (cores_round && !cpus_share_cache(src_cpu, dst_cpu))
-			continue;
-
 		src_rq = cpu_rq(src_cpu);
 
-		/* check if cache hot */
-		if (!cores_round && !cpus_share_cache(src_cpu, dst_cpu) && task_hot(src_rq))
+		if (cores_round) {
+			if (!cpus_share_cache(src_cpu, dst_cpu))
+				continue;
+		} else if (!cpus_share_cache(src_cpu, dst_cpu) && task_hot(src_rq)) {
+			/* check if cache hot */
 			continue;
+		}
 
 		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
 			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)

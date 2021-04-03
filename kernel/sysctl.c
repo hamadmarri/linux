@@ -346,6 +346,7 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 #endif
+#if defined(CONFIG_CACULE_RDB) || defined(CONFIG_SCHED_DEBUG)
 	{
 		.procname	= "sched_migration_cost_ns",
 		.data		= &sysctl_sched_migration_cost,
@@ -353,6 +354,7 @@ static struct ctl_table kern_table[] = {
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
+#endif
 #ifdef CONFIG_SCHED_DEBUG
 	{
 		.procname	= "sched_min_granularity_ns",
