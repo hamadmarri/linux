@@ -94,7 +94,15 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
 unsigned int sysctl_sched_wakeup_granularity			= 1000000UL;
 static unsigned int normalized_sysctl_sched_wakeup_granularity	= 1000000UL;
 
-const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
+#ifdef CONFIG_CACULE_RDB
+#ifdef CONFIG_SCHED_DEBUG
+const_debug unsigned int sysctl_sched_migration_cost   = 100000UL;
+#else
+unsigned int sysctl_sched_migration_cost	       = 100000UL;
+#endif
+#else
+const_debug unsigned int sysctl_sched_migration_cost   = 500000UL;
+#endif
 
 #ifdef CONFIG_SMP
 /*
@@ -7515,7 +7523,34 @@ struct lb_env {
 	struct list_head	tasks;
 };
 
-#if !defined(CONFIG_CACULE_RDB)
+#ifdef CONFIG_CACULE_RDB
+static int task_hot(struct rq *src_rq)
+{
+	s64 delta;
+	struct task_struct *p;
+	struct cacule_node *cn = src_rq->cfs.head;
+
+	if (!cn)
+		return 0;
+
+	p = task_of(se_of(cn));
+
+	if (p->sched_class != &fair_sched_class)
+		return 0;
+
+	if (unlikely(task_has_idle_policy(p)))
+		return 0;
+
+	if (sysctl_sched_migration_cost == -1)
+		return 1;
+	if (sysctl_sched_migration_cost == 0)
+		return 0;
+
+	delta = rq_clock_task(src_rq) - p->se.exec_start;
+
+	return delta < (s64)sysctl_sched_migration_cost;
+}
+#else
 /*
  * Is this task likely cache-hot:
  */
@@ -10233,6 +10268,10 @@ find_max_IS_rq(struct cfs_rq *cfs_rq, int dst_cpu)
 		if (tmp_rq->cfs.nr_running < 2 || !tmp_rq->cfs.head)
 			continue;
 
+		/* check if cache hot */
+		if (!cpus_share_cache(cpu, dst_cpu) && task_hot(tmp_rq))
+			continue;
+
 		local_IS = READ_ONCE(tmp_rq->cfs.IS_head);
 
 		if (local_IS > max_IS) {
@@ -10611,10 +10650,15 @@ again:
 		if (src_cpu == dst_cpu)
 			continue;
 
-		if (cores_round && !cpus_share_cache(src_cpu, dst_cpu))
-			continue;
-
 		src_rq = cpu_rq(src_cpu);
+
+		if (cores_round) {
+			if (!cpus_share_cache(src_cpu, dst_cpu))
+				continue;
+		} else if (!cpus_share_cache(src_cpu, dst_cpu) && task_hot(src_rq)) {
+			/* check if cache hot */
+			continue;
+		}
 
 		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
 			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)
