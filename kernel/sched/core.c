@@ -8105,6 +8105,9 @@ void __init sched_init(void)
 #endif
 
 #ifdef CONFIG_CACULE_RDB
+	/*
+	 * This patch is on top cacule-5.12.patch
+	 */
 	printk(KERN_INFO "CacULE CPU scheduler (RDB) v5.12 by Hamad Al Marri.");
 #endif
 
