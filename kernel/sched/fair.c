@@ -1098,9 +1098,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		struct task_struct *curtask = task_of(curr);
 
 #ifdef CONFIG_CACULE_SCHED
-	trace_sched_stat_runtime(curtask, delta_exec, curr->cacule_node.vruntime);
+		trace_sched_stat_runtime(curtask, delta_exec, curr->cacule_node.vruntime);
 #else
-	trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
 #endif
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
