@@ -86,7 +86,7 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
 unsigned int sysctl_sched_wakeup_granularity			= 1000000UL;
 static unsigned int normalized_sysctl_sched_wakeup_granularity	= 1000000UL;
 
-const_debug unsigned int sysctl_sched_migration_cost   = 500000UL;
+const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
 
 int sched_thermal_decay_shift;
 static int __init setup_sched_thermal_decay_shift(char *str)
@@ -595,7 +595,6 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 #endif /* CONFIG_CACULE_SCHED */
 
 #ifdef CONFIG_CACULE_SCHED
-
 static unsigned int
 calc_interactivity(u64 now, struct cacule_node *se)
 {
@@ -1073,7 +1072,6 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
-
 #ifdef CONFIG_CACULE_SCHED
 	curr->cacule_node.vruntime += calc_delta_fair(delta_exec, curr);
 	normalize_lifetime(now, curr);
@@ -1086,9 +1084,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 		struct task_struct *curtask = task_of(curr);
 
 #ifdef CONFIG_CACULE_SCHED
-	trace_sched_stat_runtime(curtask, delta_exec, curr->cacule_node.vruntime);
+		trace_sched_stat_runtime(curtask, delta_exec, curr->cacule_node.vruntime);
 #else
-	trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
+		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
 #endif
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
@@ -4548,7 +4546,7 @@ static void clear_buddies(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	if (cfs_rq->skip == se)
 		__clear_buddies_skip(se);
 }
-#endif // !CONFIG_CACULE_SCHED
+#endif /* !CONFIG_CACULE_SCHED */
 
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq);
 
@@ -5647,9 +5645,7 @@ static inline bool cfs_bandwidth_used(void)
 
 static void account_cfs_rq_runtime(struct cfs_rq *cfs_rq, u64 delta_exec) {}
 static bool check_cfs_rq_runtime(struct cfs_rq *cfs_rq) { return false; }
-
 static void check_enqueue_throttle(struct cfs_rq *cfs_rq) {}
-
 static inline void sync_throttle(struct task_group *tg, int cpu) {}
 static __always_inline void return_cfs_rq_runtime(struct cfs_rq *cfs_rq) {}
 
@@ -5892,7 +5888,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	struct cfs_rq *cfs_rq;
 	struct sched_entity *se = &p->se;
 	int task_sleep = flags & DEQUEUE_SLEEP;
-
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
 
@@ -10937,9 +10932,17 @@ static inline bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle
 }
 
 static inline void nohz_newidle_balance(struct rq *this_rq) { }
-
 #endif /* CONFIG_NO_HZ_COMMON */
 
+/*
+ * newidle_balance is called by schedule() if this_cpu is about to become
+ * idle. Attempts to pull tasks from other CPUs.
+ *
+ * Returns:
+ *   < 0 - we released the lock and there are !fair tasks present
+ *     0 - failed, no new tasks
+ *   > 0 - success, new (fair) tasks present
+ */
 static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 {
 	unsigned long next_balance = jiffies + HZ;
