@@ -618,7 +618,7 @@ calc_interactivity(u64 now, struct cacule_node *se)
 
 static inline int is_interactive(struct cacule_node *cn)
 {
-	if (cn->vruntime == 0)
+	if (se_of(cn)->vruntime == 0)
 		return 0;
 
 	return calc_interactivity(sched_clock(), cn) < interactivity_threshold;
@@ -1075,7 +1075,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
 	u64 now = sched_clock();
-	u64 delta_exec;
+	u64 delta_exec, delta_fair;
 
 	if (unlikely(!curr))
 		return;
@@ -1093,7 +1093,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
 #ifdef CONFIG_CACULE_SCHED
-	curr->cacule_node.vruntime += calc_delta_fair(delta_exec, curr);
+	delta_fair = calc_delta_fair(delta_exec, curr);
+	curr->vruntime += delta_fair;
+	curr->cacule_node.vruntime += delta_fair;
 	normalize_lifetime(now, curr);
 #else
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
@@ -1103,11 +1105,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
 
-#ifdef CONFIG_CACULE_SCHED
-		trace_sched_stat_runtime(curtask, delta_exec, curr->cacule_node.vruntime);
-#else
 		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
-#endif
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
 	}
@@ -7017,7 +7015,6 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 
 #ifdef CONFIG_CACULE_SCHED
 	struct sched_entity *se = &p->se;
-	unsigned int autogroup_enabled = 0;
 
 	if (!is_interactive(&se->cacule_node))
 		goto cfs_way;
