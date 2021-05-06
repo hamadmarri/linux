@@ -32,9 +32,11 @@ extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int sysctl_sched_child_runs_first;
 
 #ifdef CONFIG_CACULE_SCHED
-extern int interactivity_factor;
+extern unsigned int interactivity_factor;
 extern unsigned int interactivity_threshold;
-extern int cacule_max_lifetime;
+extern unsigned int cacule_max_lifetime;
+extern unsigned int fake_interactive_win_time;
+extern unsigned int nr_fork_threshold;
 #endif
 
 enum sched_tunable_scaling {
