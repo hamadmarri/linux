@@ -122,7 +122,7 @@ int __weak arch_asym_cpu_priority(int cpu)
 unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
 unsigned int __read_mostly interactivity_factor		= 32768;
 unsigned int __read_mostly interactivity_threshold	= 1000;
-unsigned int __read_mostly nr_fork_threshold		= 3;
+unsigned int __read_mostly nr_fork_threshold		= 0;
 #endif
 
 #ifdef CONFIG_CFS_BANDWIDTH
@@ -11443,6 +11443,7 @@ void init_cfs_rq(struct cfs_rq *cfs_rq)
 #ifdef CONFIG_CACULE_SCHED
 	cfs_rq->head = NULL;
 	cfs_rq->tail = NULL;
+	nr_fork_threshold = num_online_cpus() - 1;
 #endif
 }
 
