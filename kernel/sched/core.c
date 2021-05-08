@@ -3067,11 +3067,13 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.sum_exec_runtime		= 0;
 	p->se.prev_sum_exec_runtime	= 0;
 	p->se.nr_migrations		= 0;
+	p->se.vruntime			= 0;
 
 #ifdef CONFIG_CACULE_SCHED
 	p->se.cacule_node.vruntime	= 0;
-#else
-	p->se.vruntime			= 0;
+	p->fork_start_win_stamp		= 0;
+	p->nr_forks_per_time		= 0;
+	p->is_fake_interactive		= 0;
 #endif
 
 	INIT_LIST_HEAD(&p->se.group_node);
@@ -7077,7 +7079,7 @@ void __init sched_init(void)
 #endif
 
 #ifdef CONFIG_CACULE_SCHED
-	printk(KERN_INFO "CacULE CPU scheduler v5.10 by Hamad Al Marri.");
+	printk(KERN_INFO "CacULE CPU scheduler v5.10-r2 by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();
