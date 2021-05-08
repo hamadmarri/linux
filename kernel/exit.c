@@ -648,6 +648,17 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 	write_lock_irq(&tasklist_lock);
 	forget_original_parent(tsk, &dead);
 
+#ifdef CONFIG_CACULE_SCHED
+	p = tsk->parent;
+	if (p) {
+		if (p->nr_forks_per_time)
+			p->nr_forks_per_time--;
+
+		if (p->is_fake_interactive)
+			p->is_fake_interactive--;
+	}
+#endif
+
 	if (group_dead)
 		kill_orphaned_pgrp(tsk->group_leader, NULL);
 

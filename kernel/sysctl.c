@@ -1664,7 +1664,7 @@ static struct ctl_table kern_table[] = {
 	{
 		.procname	= "sched_interactivity_factor",
 		.data		= &interactivity_factor,
-		.maxlen		= sizeof(int),
+		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
@@ -1678,7 +1678,21 @@ static struct ctl_table kern_table[] = {
 	{
 		.procname	= "sched_max_lifetime_ms",
 		.data		= &cacule_max_lifetime,
-		.maxlen		= sizeof(int),
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "sched_fake_interactive_decay_time_ms",
+		.data		= &fake_interactive_decay_time,
+		.maxlen		= sizeof(unsigned int),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "sched_nr_fork_threshold",
+		.data		= &nr_fork_threshold,
+		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
 	},
