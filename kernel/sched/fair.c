@@ -122,6 +122,7 @@ int __weak arch_asym_cpu_priority(int cpu)
 unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
 unsigned int __read_mostly interactivity_factor		= 32768;
 unsigned int __read_mostly interactivity_threshold	= 1000;
+unsigned int __read_mostly fake_interactive_decay_time	= 1000; // in ms
 unsigned int __read_mostly nr_fork_threshold		= 3;
 #endif
 
@@ -601,6 +602,8 @@ static inline unsigned int is_fake_interactive(struct cacule_node *cn)
 	struct sched_entity *se = se_of(cn);
 	struct task_struct *parent = NULL;
 	struct cfs_rq *cfs_rq;
+	u64 win_time = fake_interactive_decay_time * 1000000ULL;
+	u64 now = sched_clock();
 
 	while (!parent) {
 		if (entity_is_task(se)) {
@@ -617,6 +620,13 @@ static inline unsigned int is_fake_interactive(struct cacule_node *cn)
 			se = se_of(cfs_rq->head);
 		else if (cfs_rq->curr)
 			se = cfs_rq->curr;
+	}
+
+	if (parent->is_fake_interactive
+	    && (now - parent->fork_start_win_stamp > win_time))
+	{
+		parent->fork_start_win_stamp = now;
+		parent->is_fake_interactive--;
 	}
 
 	return parent->is_fake_interactive;

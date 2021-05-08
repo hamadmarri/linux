@@ -35,6 +35,7 @@ extern unsigned int sysctl_sched_child_runs_first;
 extern unsigned int interactivity_factor;
 extern unsigned int interactivity_threshold;
 extern unsigned int cacule_max_lifetime;
+extern unsigned int fake_interactive_decay_time;
 extern unsigned int nr_fork_threshold;
 #endif
 
