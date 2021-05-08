@@ -1682,8 +1682,8 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 	{
-		.procname	= "sched_fake_interactive_win_time_ms",
-		.data		= &fake_interactive_win_time,
+		.procname	= "sched_fake_interactive_decay_time_ms",
+		.data		= &fake_interactive_decay_time,
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
