@@ -5915,6 +5915,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int task_sleep = flags & DEQUEUE_SLEEP;
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
+#ifdef CONFIG_CACULE_SCHED
 	struct task_struct *parent = p->parent;
 
 	if (task_sleep && parent) {
@@ -5924,6 +5925,7 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 		if (parent->is_fake_interactive)
 			parent->is_fake_interactive--;
 	}
+#endif
 
 	util_est_dequeue(&rq->cfs, p);
 
