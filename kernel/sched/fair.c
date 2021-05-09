@@ -122,8 +122,8 @@ int __weak arch_asym_cpu_priority(int cpu)
 unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
 unsigned int __read_mostly interactivity_factor		= 32768;
 unsigned int __read_mostly interactivity_threshold	= 1000;
-unsigned int __read_mostly fake_interactive_decay_time	= 1000; // in ms
-unsigned int __read_mostly nr_fork_threshold		= 3;
+unsigned int __read_mostly fake_interactive_decay_time	= 300; // in ms
+unsigned int __read_mostly nr_fork_threshold		= 50;
 #endif
 
 #ifdef CONFIG_CFS_BANDWIDTH
@@ -597,13 +597,30 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 #endif /* CONFIG_CACULE_SCHED */
 
 #ifdef CONFIG_CACULE_SCHED
-static inline unsigned int is_fake_interactive(struct cacule_node *cn)
+static inline void
+fork_decay_sub(struct task_struct *p, u64 idle_time)
+{
+	u64 decay_granularity = 100000000;
+	unsigned int decay = idle_time / decay_granularity;
+
+	if (p->interactivity_level > decay)
+		p->interactivity_level -= decay;
+	else
+		p->interactivity_level = 0;
+
+	if (p->nr_forks_per_time > decay)
+		p->nr_forks_per_time -= decay;
+	else
+		p->nr_forks_per_time = 0;
+}
+
+static inline unsigned int get_interactivity_level(struct cacule_node *cn)
 {
 	struct sched_entity *se = se_of(cn);
 	struct task_struct *parent = NULL;
 	struct cfs_rq *cfs_rq;
-	u64 win_time = fake_interactive_decay_time * 1000000ULL;
-	u64 now = sched_clock();
+	u64 decay_time = fake_interactive_decay_time * 1000000ULL;
+	u64 idle_time, now = sched_clock();
 
 	while (!parent) {
 		if (entity_is_task(se)) {
@@ -622,21 +639,35 @@ static inline unsigned int is_fake_interactive(struct cacule_node *cn)
 			se = cfs_rq->curr;
 	}
 
-	if (parent->is_fake_interactive
-	    && (now - parent->fork_start_win_stamp > win_time))
-	{
-		parent->fork_start_win_stamp = now;
-		parent->is_fake_interactive--;
+	/*
+	 * loop through parents until either
+	 * 1- the interactivity level of the
+	 *    current parent is > 0
+	 *
+	 * 2- parent is a root
+	 */
+	while(parent->parent && parent->parent->pid > 2) {
+		idle_time = now - parent->fork_start_win_stamp;
+
+		if (parent->interactivity_level && idle_time > decay_time) {
+			fork_decay_sub(parent, idle_time);
+			parent->fork_start_win_stamp = now;
+		}
+
+		if (parent->interactivity_level)
+			return parent->interactivity_level;
+
+		parent = parent->parent;
 	}
 
-	return parent->is_fake_interactive;
+	return 0;
 }
 
 static unsigned int
 calc_interactivity(u64 now, struct cacule_node *se)
 {
 	u64 l_se, vr_se, sleep_se = 1ULL, u64_factor_m, _2m;
-	unsigned int score_se, fake_interactivity;
+	unsigned int score_se, interactivity_level;
 
 	/*
 	 * in case of vruntime==0, logical OR with 1 would
@@ -656,9 +687,9 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	else
 		score_se = _2m - (u64_factor_m / (vr_se / sleep_se));
 
-	fake_interactivity = is_fake_interactive(se);
-	if (fake_interactivity)
-		score_se += (_2m * fake_interactivity) + 1;
+	interactivity_level = get_interactivity_level(se);
+	if (interactivity_level)
+		score_se += (_2m * interactivity_level) + 1;
 
 	return score_se;
 }
@@ -668,7 +699,7 @@ static inline int is_interactive(struct cacule_node *cn)
 	if (se_of(cn)->vruntime == 0)
 		return 0;
 
-	if (is_fake_interactive(cn))
+	if (get_interactivity_level(cn))
 		return 0;
 
 	return calc_interactivity(sched_clock(), cn) < interactivity_threshold;
@@ -5915,17 +5946,6 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int task_sleep = flags & DEQUEUE_SLEEP;
 	int idle_h_nr_running = task_has_idle_policy(p);
 	bool was_sched_idle = sched_idle_rq(rq);
-#ifdef CONFIG_CACULE_SCHED
-	struct task_struct *parent = p->parent;
-
-	if (task_sleep && parent) {
-		if (parent->nr_forks_per_time)
-			parent->nr_forks_per_time--;
-
-		if (parent->is_fake_interactive)
-			parent->is_fake_interactive--;
-	}
-#endif
 
 	util_est_dequeue(&rq->cfs, p);
 
@@ -11190,7 +11210,6 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
 	struct task_struct *parent = p->parent;
-	u64 now = sched_clock();
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
@@ -11202,9 +11221,8 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 
 	rq_unlock(rq, &rf);
 
-	parent->fork_start_win_stamp = now;
 	if (parent->nr_forks_per_time >= nr_fork_threshold)
-		parent->is_fake_interactive++;
+		parent->interactivity_level++;
 
 	parent->nr_forks_per_time++;
 }

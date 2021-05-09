@@ -673,8 +673,8 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 		if (p->nr_forks_per_time)
 			p->nr_forks_per_time--;
 
-		if (p->is_fake_interactive)
-			p->is_fake_interactive--;
+		if (p->interactivity_level)
+			p->interactivity_level--;
 	}
 #endif
 
