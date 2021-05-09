@@ -3560,7 +3560,7 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 	p->se.cacule_node.vruntime	= 0;
 	p->fork_start_win_stamp		= 0;
 	p->nr_forks_per_time		= 0;
-	p->is_fake_interactive		= 0;
+	p->interactivity_level		= 0;
 #endif
 
 	INIT_LIST_HEAD(&p->se.group_node);

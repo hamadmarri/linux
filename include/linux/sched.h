@@ -887,7 +887,7 @@ struct task_struct {
 #ifdef CONFIG_CACULE_SCHED
 	u64				fork_start_win_stamp;
 	unsigned int			nr_forks_per_time;
-	int				is_fake_interactive;
+	int				interactivity_level;
 #endif
 
 	/*
