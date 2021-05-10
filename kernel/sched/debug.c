@@ -483,29 +483,6 @@ static char *task_group_path(struct task_group *tg)
 }
 #endif
 
-#ifdef CONFIG_CACULE_SCHED
-static inline unsigned int get_interactivity_level(struct task_struct *p)
-{
-	struct task_struct *parent = p->parent;
-
-	/*
-	 * loop through parents until either
-	 * 1- the interactivity level of the
-	 *    current parent is > 0
-	 *
-	 * 2- parent is a root
-	 */
-	while(parent->parent && parent->parent->pid > 2) {
-		if (parent->interactivity_level)
-			return parent->interactivity_level;
-
-		parent = parent->parent;
-	}
-
-	return 0;
-}
-#endif
-
 static void
 print_task(struct seq_file *m, struct rq *rq, struct task_struct *p)
 {
@@ -514,12 +491,7 @@ print_task(struct seq_file *m, struct rq *rq, struct task_struct *p)
 	else
 		SEQ_printf(m, " %c", task_state_to_char(p));
 
-#ifdef CONFIG_CACULE_SCHED
-	SEQ_printf(m, " %3d %15s %5d %9Ld.%06ld %9Ld %5d ",
-		get_interactivity_level(p),
-#else
 	SEQ_printf(m, " %15s %5d %9Ld.%06ld %9Ld %5d ",
-#endif
 		p->comm, task_pid_nr(p),
 		SPLIT_NS(p->se.vruntime),
 		(long long)(p->nvcsw + p->nivcsw),
@@ -546,13 +518,8 @@ static void print_rq(struct seq_file *m, struct rq *rq, int rq_cpu)
 
 	SEQ_printf(m, "\n");
 	SEQ_printf(m, "runnable tasks:\n");
-#ifdef CONFIG_CACULE_SCHED
-	SEQ_printf(m, " S  IL            task   PID         tree-key  switches  prio"
-		   "     wait-time             sum-exec        sum-sleep\n");
-#else
 	SEQ_printf(m, " S            task   PID         tree-key  switches  prio"
 		   "     wait-time             sum-exec        sum-sleep\n");
-#endif
 	SEQ_printf(m, "-------------------------------------------------------"
 		   "------------------------------------------------------\n");
 

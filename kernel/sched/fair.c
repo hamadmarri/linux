@@ -122,8 +122,6 @@ int __weak arch_asym_cpu_priority(int cpu)
 unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
 unsigned int __read_mostly interactivity_factor		= 32768;
 unsigned int __read_mostly interactivity_threshold	= 1000;
-unsigned int __read_mostly fake_interactive_decay_time	= 300; // in ms
-unsigned int __read_mostly nr_fork_threshold		= 50;
 #endif
 
 #ifdef CONFIG_CFS_BANDWIDTH
@@ -597,77 +595,11 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 #endif /* CONFIG_CACULE_SCHED */
 
 #ifdef CONFIG_CACULE_SCHED
-static inline void
-fork_decay_sub(struct task_struct *p, u64 idle_time)
-{
-	u64 decay_granularity = 100000000;
-	unsigned int decay = idle_time / decay_granularity;
-
-	if (p->interactivity_level > decay)
-		p->interactivity_level -= decay;
-	else
-		p->interactivity_level = 0;
-
-	if (p->nr_forks_per_time > decay)
-		p->nr_forks_per_time -= decay;
-	else
-		p->nr_forks_per_time = 0;
-}
-
-static inline unsigned int get_interactivity_level(struct cacule_node *cn)
-{
-	struct sched_entity *se = se_of(cn);
-	struct task_struct *parent = NULL;
-	struct cfs_rq *cfs_rq;
-	u64 decay_time = fake_interactive_decay_time * 1000000ULL;
-	u64 idle_time, now = sched_clock();
-
-	while (!parent) {
-		if (entity_is_task(se)) {
-			parent = task_of(se)->parent;
-			break;
-		}
-
-		cfs_rq = group_cfs_rq(se);
-
-		if (!cfs_rq->head && !cfs_rq->curr)
-			return 0;
-
-		if (cfs_rq->head)
-			se = se_of(cfs_rq->head);
-		else if (cfs_rq->curr)
-			se = cfs_rq->curr;
-	}
-
-	/*
-	 * loop through parents until either
-	 * 1- the interactivity level of the
-	 *    current parent is > 0
-	 *
-	 * 2- parent is a root
-	 */
-	while(parent->parent && parent->parent->pid > 2) {
-		idle_time = now - parent->fork_start_win_stamp;
-
-		if (parent->interactivity_level && idle_time > decay_time) {
-			fork_decay_sub(parent, idle_time);
-			parent->fork_start_win_stamp = now;
-		}
-
-		if (parent->interactivity_level)
-			return parent->interactivity_level;
-
-		parent = parent->parent;
-	}
-
-	return 0;
-}
-
 static unsigned int
 calc_interactivity(u64 now, struct cacule_node *se)
 {
 	u64 l_se, vr_se, sleep_se = 1ULL, u64_factor_m, _2m;
-	unsigned int score_se, interactivity_level;
+	unsigned int score_se;
 
 	/*
 	 * in case of vruntime==0, logical OR with 1 would
@@ -687,19 +619,12 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	else
 		score_se = _2m - (u64_factor_m / (vr_se / sleep_se));
 
-	interactivity_level = get_interactivity_level(se);
-	if (interactivity_level)
-		score_se += (_2m * interactivity_level) + 1;
-
 	return score_se;
 }
 
 static inline int is_interactive(struct cacule_node *cn)
 {
 	if (se_of(cn)->vruntime == 0)
-		return 0;
-
-	if (get_interactivity_level(cn))
 		return 0;
 
 	return calc_interactivity(sched_clock(), cn) < interactivity_threshold;
@@ -11209,7 +11134,6 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 	struct sched_entity *curr;
 	struct rq *rq = this_rq();
 	struct rq_flags rf;
-	struct task_struct *parent = p->parent;
 
 	rq_lock(rq, &rf);
 	update_rq_clock(rq);
@@ -11220,11 +11144,6 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		update_curr(cfs_rq);
 
 	rq_unlock(rq, &rf);
-
-	if (parent->nr_forks_per_time >= nr_fork_threshold)
-		parent->interactivity_level++;
-
-	parent->nr_forks_per_time++;
 }
 #else
 static void task_fork_fair(struct task_struct *p)
