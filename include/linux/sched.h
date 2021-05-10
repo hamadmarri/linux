@@ -870,12 +870,6 @@ struct task_struct {
 	struct list_head		sibling;
 	struct task_struct		*group_leader;
 
-#ifdef CONFIG_CACULE_SCHED
-	u64				fork_start_win_stamp;
-	unsigned int			nr_forks_per_time;
-	int				is_fake_interactive;
-#endif
-
 	/*
 	 * 'ptraced' is the list of tasks this task is using ptrace() on.
 	 *
