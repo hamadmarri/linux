@@ -86,7 +86,7 @@ unsigned int sysctl_sched_child_runs_first __read_mostly;
 unsigned int sysctl_sched_wakeup_granularity			= 1000000UL;
 static unsigned int normalized_sysctl_sched_wakeup_granularity	= 1000000UL;
 
-const_debug unsigned int sysctl_sched_migration_cost   = 500000UL;
+const_debug unsigned int sysctl_sched_migration_cost	= 500000UL;
 
 int sched_thermal_decay_shift;
 static int __init setup_sched_thermal_decay_shift(char *str)
@@ -119,9 +119,9 @@ int __weak arch_asym_cpu_priority(int cpu)
 
 #endif
 #ifdef CONFIG_CACULE_SCHED
-int __read_mostly cacule_max_lifetime			= 1600; // in ms
-int __read_mostly interactivity_factor			= 32768;
-unsigned int __read_mostly interactivity_threshold	= 20480;
+unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
+unsigned int __read_mostly interactivity_factor		= 32768;
+unsigned int __read_mostly interactivity_threshold	= 1000;
 #endif
 
 #ifdef CONFIG_CFS_BANDWIDTH
@@ -595,11 +595,10 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 #endif /* CONFIG_CACULE_SCHED */
 
 #ifdef CONFIG_CACULE_SCHED
-
 static unsigned int
 calc_interactivity(u64 now, struct cacule_node *se)
 {
-	u64 l_se, vr_se, sleep_se = 1ULL, u64_factor;
+	u64 l_se, vr_se, sleep_se = 1ULL, u64_factor_m, _2m;
 	unsigned int score_se;
 
 	/*
@@ -607,24 +606,25 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	 * make sure that the least sig. bit is 1
 	 */
 	l_se		= now - se->cacule_start_time;
-	vr_se		= se->vruntime		| 1;
-	u64_factor	= interactivity_factor;
+	vr_se		= se->vruntime | 1;
+	u64_factor_m	= interactivity_factor;
+	_2m		= u64_factor_m << 1;
 
 	/* safety check */
 	if (likely(l_se > vr_se))
 		sleep_se = (l_se - vr_se) | 1;
 
 	if (sleep_se >= vr_se)
-		score_se = u64_factor / (sleep_se / vr_se);
+		score_se = u64_factor_m / (sleep_se / vr_se);
 	else
-		score_se = (u64_factor << 1) - (u64_factor / (vr_se / sleep_se));
+		score_se = _2m - (u64_factor_m / (vr_se / sleep_se));
 
 	return score_se;
 }
 
 static inline int is_interactive(struct cacule_node *cn)
 {
-	if (cn->vruntime == 0)
+	if (se_of(cn)->vruntime == 0)
 		return 0;
 
 	return calc_interactivity(sched_clock(), cn) < interactivity_threshold;
@@ -1020,7 +1020,7 @@ static void update_tg_load_avg(struct cfs_rq *cfs_rq)
 #ifdef CONFIG_CACULE_SCHED
 static void normalize_lifetime(u64 now, struct sched_entity *se)
 {
-	struct cacule_node *cn;
+	struct cacule_node *cn = &se->cacule_node;
 	u64 max_life_ns, life_time;
 	s64 diff;
 
@@ -1030,25 +1030,21 @@ static void normalize_lifetime(u64 now, struct sched_entity *se)
 	 * Ex. for 30s, with left shift (20bits) == 31.457s
 	 */
 	max_life_ns	= ((u64) cacule_max_lifetime) << 20;
+	life_time	= now - cn->cacule_start_time;
+	diff		= life_time - max_life_ns;
 
-	for_each_sched_entity(se) {
-		cn		= &se->cacule_node;
-		life_time	= now - cn->cacule_start_time;
-		diff		= life_time - max_life_ns;
+	if (diff > 0) {
+		// multiply life_time by 1024 for more precision
+		u64 old_hrrn_x	= (life_time << 7) / ((cn->vruntime >> 3) | 1);
 
-		if (unlikely(diff > 0)) {
-			// multiply life_time by 8 for more precision
-			u64 old_hrrn_x8	= life_time / ((cn->vruntime >> 3) | 1);
+		// reset life to half max_life (i.e ~15s)
+		cn->cacule_start_time = now - (max_life_ns >> 1);
 
-			// reset life to half max_life (i.e ~15s)
-			cn->cacule_start_time = now - (max_life_ns >> 1);
+		// avoid division by zero
+		if (old_hrrn_x == 0) old_hrrn_x = 1;
 
-			// avoid division by zero
-			if (old_hrrn_x8 == 0) old_hrrn_x8 = 1;
-
-			// reset vruntime based on old hrrn ratio
-			cn->vruntime = (max_life_ns << 2) / old_hrrn_x8;
-		}
+		// reset vruntime based on old hrrn ratio
+		cn->vruntime = (max_life_ns << 9) / old_hrrn_x;
 	}
 }
 #endif /* CONFIG_CACULE_SCHED */
@@ -1060,7 +1056,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 {
 	struct sched_entity *curr = cfs_rq->curr;
 	u64 now = sched_clock();
-	u64 delta_exec;
+	u64 delta_exec, delta_fair;
 
 	if (unlikely(!curr))
 		return;
@@ -1077,9 +1073,10 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->sum_exec_runtime += delta_exec;
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
-
 #ifdef CONFIG_CACULE_SCHED
-	curr->cacule_node.vruntime += calc_delta_fair(delta_exec, curr);
+	delta_fair = calc_delta_fair(delta_exec, curr);
+	curr->vruntime += delta_fair;
+	curr->cacule_node.vruntime += delta_fair;
 	normalize_lifetime(now, curr);
 #else
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
@@ -1089,11 +1086,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	if (entity_is_task(curr)) {
 		struct task_struct *curtask = task_of(curr);
 
-#ifdef CONFIG_CACULE_SCHED
-		trace_sched_stat_runtime(curtask, delta_exec, curr->cacule_node.vruntime);
-#else
 		trace_sched_stat_runtime(curtask, delta_exec, curr->vruntime);
-#endif
 		cgroup_account_cputime(curtask, delta_exec);
 		account_group_exec_runtime(curtask, delta_exec);
 	}
@@ -7124,9 +7117,6 @@ compare:
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
-#ifdef CONFIG_CACULE_RDB
-	return select_idle_sibling(p, prev_cpu, prev_cpu);
-#else
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 	struct sched_domain *tmp, *sd = NULL;
 	int cpu = smp_processor_id();
@@ -7137,14 +7127,15 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 
 #ifdef CONFIG_CACULE_SCHED
 	struct sched_entity *se = &p->se;
-	unsigned int autogroup_enabled = 0;
 
-#ifdef CONFIG_SCHED_AUTOGROUP
-	autogroup_enabled = sysctl_sched_autogroup_enabled;
-#endif
-
-	if (autogroup_enabled || !is_interactive(&se->cacule_node))
+	if (!is_interactive(&se->cacule_node))
 		goto cfs_way;
+
+	// check first if the prev cpu
+	// has 0 tasks
+	if (cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
+	    cpu_rq(prev_cpu)->cfs.nr_running == 0)
+		return prev_cpu;
 
 	new_cpu = find_least_IS_cpu(p);
 
@@ -7153,7 +7144,11 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 
 	new_cpu = prev_cpu;
 cfs_way:
-#else
+#ifdef CONFIG_CACULE_RDB
+	return select_idle_sibling(p, prev_cpu, prev_cpu);
+#endif /* CONFIG_CACULE_RDB */
+
+#else /* CONFIG_CACULE_SCHED */
 	if (wake_flags & WF_TTWU) {
 		record_wakee(p);
 
@@ -7202,7 +7197,6 @@ cfs_way:
 	rcu_read_unlock();
 
 	return new_cpu;
-#endif /* CONFIG_CACULE_RDB */
 }
 
 #if !defined(CONFIG_CACULE_RDB)
