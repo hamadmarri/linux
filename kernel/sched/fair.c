@@ -674,18 +674,47 @@ entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 {
 	struct cacule_node *se = &(_se->cacule_node);
+	struct cacule_node *iter, *next = NULL;
+	u64 now = sched_clock();
+	unsigned int score_se = calc_interactivity(now, se);
 
 	se->next = NULL;
 	se->prev = NULL;
 
 	if (likely(cfs_rq->head)) {
+
+		// start from tail
+		iter = cfs_rq->tail;
+
+		// does se have higher IS than iter?
+		while (iter && entity_before_cached(now, score_se, iter) == -1) {
+			next = iter;
+			iter = iter->prev;
+		}
+
+		// se in tail position
+		if (iter == cfs_rq->tail) {
+			cfs_rq->tail->next	= se;
+			se->prev		= cfs_rq->tail;
+
+			cfs_rq->tail		= se;
+		}
+		// else if not head no tail, insert se after iter
+		else if (iter) {
+			se->next	= next;
+			se->prev	= iter;
+
+			iter->next	= se;
+			next->prev	= se;
+		}
 		// insert se at head
-		se->next = cfs_rq->head;
-		cfs_rq->head->prev = se;
+		else {
+			se->next		= cfs_rq->head;
+			cfs_rq->head->prev	= se;
 
-		// lastly reset the head
-		cfs_rq->head = se;
-
+			// lastly reset the head
+			cfs_rq->head		= se;
+		}
 	} else {
 		// if empty rq
 		cfs_rq->head = se;
@@ -4575,17 +4604,16 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 }
 
 #ifdef CONFIG_CACULE_SCHED
-static struct sched_entity *
-pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
-
 /*
  * Preempt the current task with a newly woken task if needed:
  */
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
+	u64 now	= sched_clock();
+
 	// does head have higher IS than curr
-	if (pick_next_entity(cfs_rq, curr) != curr)
+	if (entity_before(now, &curr->cacule_node, cfs_rq->head) == 1)
 		resched_curr(rq_of(cfs_rq));
 }
 #else
@@ -4667,26 +4695,12 @@ set_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *se)
 static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	struct cacule_node *next, *se = cfs_rq->head;
-	u64 now = sched_clock();
-	unsigned int score_se;
+	struct cacule_node *se = cfs_rq->head;
 
 	if (unlikely(!se))
-		return curr;
-
-	score_se = calc_interactivity(now, se);
-
-	next = se->next;
-	while (next) {
-		if (entity_before_cached(now, score_se, next) == 1) {
-			se = next;
-			score_se = calc_interactivity(now, se);
-		}
-
-		next = next->next;
-	}
-
-	if (unlikely(curr && entity_before_cached(now, score_se, &curr->cacule_node) == 1))
+		se = &curr->cacule_node;
+	else if (unlikely(curr
+			&& entity_before(sched_clock(), se, &curr->cacule_node) == 1))
 		se = &curr->cacule_node;
 
 	return se_of(se);
