@@ -47,7 +47,7 @@ choice
 	 systems requiring fast interactive responses to events.
 
 	config HZ_2000
-                bool "2000 HZ"
+		bool "2000 HZ"
 
 endchoice
 
