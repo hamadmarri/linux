@@ -7117,13 +7117,15 @@ compare:
 static int
 select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 {
+#if !defined(CONFIG_CACULE_RDB)
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 	struct sched_domain *tmp, *sd = NULL;
 	int cpu = smp_processor_id();
-	int new_cpu = prev_cpu;
 	int want_affine = 0;
 	/* SD_flags and WF_flags share the first nibble */
 	int sd_flag = wake_flags & 0xF;
+#endif
+	int new_cpu = prev_cpu;
 
 #ifdef CONFIG_CACULE_SCHED
 	struct sched_entity *se = &p->se;
@@ -7144,10 +7146,6 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 
 	new_cpu = prev_cpu;
 cfs_way:
-#ifdef CONFIG_CACULE_RDB
-	return select_idle_sibling(p, prev_cpu, prev_cpu);
-#endif /* CONFIG_CACULE_RDB */
-
 #else /* CONFIG_CACULE_SCHED */
 	if (wake_flags & WF_TTWU) {
 		record_wakee(p);
@@ -7163,6 +7161,9 @@ cfs_way:
 	}
 #endif /* CONFIG_CACULE_SCHED */
 
+#ifdef CONFIG_CACULE_RDB
+	return select_idle_sibling(p, prev_cpu, prev_cpu);
+#else
 	rcu_read_lock();
 	for_each_domain(cpu, tmp) {
 		/*
@@ -7197,6 +7198,7 @@ cfs_way:
 	rcu_read_unlock();
 
 	return new_cpu;
+#endif /* CONFIG_CACULE_RDB */
 }
 
 #if !defined(CONFIG_CACULE_RDB)
@@ -8510,9 +8512,9 @@ static unsigned long task_h_load(struct task_struct *p)
 }
 #endif
 
+#if !defined(CONFIG_CACULE_RDB)
 static void update_blocked_averages(int cpu)
 {
-#if !defined(CONFIG_CACULE_RDB)
 	bool decayed = false, done = true;
 	struct rq *rq = cpu_rq(cpu);
 	struct rq_flags rf;
@@ -8527,8 +8529,8 @@ static void update_blocked_averages(int cpu)
 	if (decayed)
 		cpufreq_update_util(rq, 0);
 	rq_unlock_irqrestore(rq, &rf);
-#endif
 }
+#endif
 
 /********** Helpers for find_busiest_group ************************/
 
