@@ -4541,8 +4541,26 @@ void scheduler_tick(void)
 	struct rq_flags rf;
 	unsigned long thermal_pressure;
 
+#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
+	int scale_down_hz = 10;
+	/* skip HZ/scale_down_hz ticks */
+	int skip = HZ / scale_down_hz;
+#endif
+
 	arch_scale_freq_tick();
 	sched_clock_tick();
+
+#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
+	rq->ticks++;
+	if (rq->nr_running == 1 && rq->ticks < skip) {
+		rq->idle_balance = idle_cpu(cpu);
+		trigger_nohz_balancer_kick(rq);
+
+		/* skip */
+		return;
+	}
+	rq->ticks = 0;
+#endif
 
 	rq_lock(rq, &rf);
 
@@ -8181,6 +8199,11 @@ void __init sched_init(void)
 		init_cfs_rq(&rq->cfs);
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
+
+#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
+	rq->ticks = 0;
+#endif
+
 #ifdef CONFIG_FAIR_GROUP_SCHED
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;

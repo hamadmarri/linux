@@ -10616,7 +10616,6 @@ static inline int find_new_ilb(void)
 	return nr_cpu_ids;
 }
 
-#if !defined(CONFIG_CACULE_RDB)
 /*
  * Kick a CPU to do the nohz balancing, if it is time for it. We pick any
  * idle CPU in the HK_FLAG_MISC housekeeping set (if there is one).
@@ -10767,7 +10766,6 @@ out:
 	if (flags)
 		kick_ilb(flags);
 }
-#endif
 
 static void set_cpu_sd_state_busy(int cpu)
 {
@@ -11066,6 +11064,32 @@ can_migrate_task(struct task_struct *p, int dst_cpu, struct rq *src_rq)
 		return 0;
 
 	return 1;
+}
+
+static void push_to_unlock(struct rq *this_rq,
+			   struct rq *dst_rq,
+			   struct task_struct *p,
+			   int dst_cpu)
+{
+	struct rq_flags rf;
+
+	// detach task
+	deactivate_task(this_rq, p, DEQUEUE_NOCLOCK);
+	set_task_cpu(p, dst_cpu);
+
+	// unlock this rq
+	raw_spin_unlock(&this_rq->lock);
+
+	/* push to */
+	rq_lock_irqsave(dst_rq, &rf);
+	update_rq_clock(dst_rq);
+
+	activate_task(dst_rq, p, ENQUEUE_NOCLOCK);
+	check_preempt_curr(dst_rq, p, 0);
+
+	// unlock src rq
+	rq_unlock(dst_rq, &rf);
+	local_irq_restore(rf.flags);
 }
 
 static void pull_from_unlock(struct rq *this_rq,
@@ -11410,6 +11434,13 @@ void trigger_load_balance(struct rq *rq)
 }
 #endif
 
+#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
+void trigger_nohz_balancer_kick(struct rq *rq)
+{
+	nohz_balancer_kick(rq);
+}
+#endif
+
 #ifdef CONFIG_CACULE_RDB
 static int
 idle_try_pull_any(struct cfs_rq *cfs_rq)
@@ -11480,47 +11511,47 @@ try_pull_higher_IS(struct cfs_rq *cfs_rq)
 	return 0;
 }
 
-static void try_pull_any(struct rq *this_rq)
+static void try_push_any(struct rq *this_rq)
 {
 	struct task_struct *p = NULL;
-	struct rq *src_rq;
-	int dst_cpu = cpu_of(this_rq);
-	int src_cpu;
-	struct rq_flags src_rf;
+	struct rq *dst_rq;
+	int dst_cpu;
+	int src_cpu = cpu_of(this_rq);
 	int cores_round = 1;
 
 again:
-	for_each_online_cpu(src_cpu) {
+	for_each_online_cpu(dst_cpu) {
 
-		if (src_cpu == dst_cpu)
+		if (dst_cpu == src_cpu)
 			continue;
 
 		if (cores_round && !cpus_share_cache(src_cpu, dst_cpu))
 			continue;
 
-		src_rq = cpu_rq(src_cpu);
+		dst_rq = cpu_rq(dst_cpu);
 
-		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
-			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)
+		if (dst_rq->cfs.nr_running >= this_rq->cfs.nr_running - 1)
 			continue;
 
-		rq_lock_irqsave(src_rq, &src_rf);
-		update_rq_clock(src_rq);
+		// lock this rq
+		raw_spin_lock(&this_rq->lock);
+		update_rq_clock(this_rq);
 
-		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
-			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)
-			goto next;
-
-		p = task_of(se_of(src_rq->cfs.head));
-
-		if (can_migrate_task(p, dst_cpu, src_rq)) {
-			pull_from_unlock(this_rq, src_rq, &src_rf, p, dst_cpu);
+		if (!this_rq->cfs.head) {
+			// unlock this rq
+			raw_spin_unlock(&this_rq->lock);
 			return;
 		}
 
-next:
-		rq_unlock(src_rq, &src_rf);
-		local_irq_restore(src_rf.flags);
+		p = task_of(se_of(this_rq->cfs.head));
+
+		if (can_migrate_task(p, dst_cpu, this_rq)) {
+			push_to_unlock(this_rq, dst_rq, p, dst_cpu);
+			return;
+		}
+
+		// unlock this rq
+		raw_spin_unlock(&this_rq->lock);
 	}
 
 	if (cores_round) {
@@ -11538,30 +11569,17 @@ active_balance(struct rq *rq)
 	if (!cfs_rq->head || cfs_rq->nr_running < 2)
 		try_pull_higher_IS(&rq->cfs);
 	else
-		try_pull_any(rq);
+		try_push_any(rq);
 }
 
 void trigger_load_balance(struct rq *rq)
 {
-	unsigned long interval = 3UL;
-
-	/* Don't need to rebalance while attached to NULL domain */
-	if (unlikely(on_null_domain(rq)))
-		return;
-
-	if (time_before(jiffies, rq->next_balance))
-		return;
-
-	if (rq->idle_balance) {
+	if (rq->idle_balance)
 		idle_try_pull_any(&rq->cfs);
-	}
-	else {
+	else
 		active_balance(rq);
 
-		/* scale ms to jiffies */
-		interval = msecs_to_jiffies(interval);
-		rq->next_balance = jiffies + interval;
-	}
+	nohz_balancer_kick(rq);
 }
 #endif
 

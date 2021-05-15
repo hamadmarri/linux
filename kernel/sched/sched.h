@@ -947,6 +947,10 @@ struct rq {
 	struct rt_rq		rt;
 	struct dl_rq		dl;
 
+#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
+	unsigned int		ticks;
+#endif
+
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this CPU: */
 	struct list_head	leaf_cfs_rq_list;
@@ -1964,6 +1968,10 @@ extern struct task_struct *pick_next_task_idle(struct rq *rq);
 extern void update_group_capacity(struct sched_domain *sd, int cpu);
 
 extern void trigger_load_balance(struct rq *rq);
+
+#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
+extern void trigger_nohz_balancer_kick(struct rq *rq);
+#endif
 
 extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask, u32 flags);
 
