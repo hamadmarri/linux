@@ -8514,9 +8514,9 @@ static unsigned long task_h_load(struct task_struct *p)
 }
 #endif
 
-#if !defined(CONFIG_CACULE_RDB)
 static void update_blocked_averages(int cpu)
 {
+#if !defined(CONFIG_CACULE_RDB)
 	bool decayed = false, done = true;
 	struct rq *rq = cpu_rq(cpu);
 	struct rq_flags rf;
@@ -8531,8 +8531,9 @@ static void update_blocked_averages(int cpu)
 	if (decayed)
 		cpufreq_update_util(rq, 0);
 	rq_unlock_irqrestore(rq, &rf);
-}
 #endif
+}
+
 
 /********** Helpers for find_busiest_group ************************/
 
