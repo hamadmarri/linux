@@ -594,6 +594,26 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 }
 #endif /* CONFIG_CACULE_SCHED */
 
+#ifdef CONFIG_CACULE_RDB
+static u64 average_vruntime(struct cacule_node *cn)
+{
+	struct task_struct *p = task_of(se_of(cn));
+	u64 sum = p->se.cacule_node.vruntime;
+	u64 counter = 1;
+
+	p = p->parent;
+
+	while (p->parent && p->parent->pid > 2) {
+		sum += p->se.cacule_node.vruntime;
+		counter++;
+
+		p = p->parent;
+	}
+
+	return sum / counter;
+}
+#endif
+
 #ifdef CONFIG_CACULE_SCHED
 static unsigned int
 calc_interactivity(u64 now, struct cacule_node *se)
@@ -606,7 +626,11 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	 * make sure that the least sig. bit is 1
 	 */
 	l_se		= now - se->cacule_start_time;
+#ifdef CONFIG_CACULE_RDB
+	vr_se		= average_vruntime(se) | 1;
+#else
 	vr_se		= se->vruntime | 1;
+#endif
 	u64_factor_m	= interactivity_factor;
 	_2m		= u64_factor_m << 1;
 
@@ -1018,6 +1042,10 @@ static void normalize_lifetime(u64 now, struct sched_entity *se)
 	struct cacule_node *cn = &se->cacule_node;
 	u64 max_life_ns, life_time;
 	s64 diff;
+#ifdef CONFIG_CACULE_RDB
+	u64 delta_vruntime;
+	struct task_struct *parent = task_of(se)->parent;
+#endif
 
 	/*
 	 * left shift 20 bits is approximately = * 1000000
@@ -1039,10 +1067,33 @@ static void normalize_lifetime(u64 now, struct sched_entity *se)
 		if (old_hrrn_x == 0) old_hrrn_x = 1;
 
 		// reset vruntime based on old hrrn ratio
+#ifdef CONFIG_CACULE_RDB
+		delta_vruntime = cn->vruntime;
 		cn->vruntime = (max_life_ns << 9) / old_hrrn_x;
+		delta_vruntime -= cn->vruntime;
+
+		while (parent->parent && parent->parent->pid > 2) {
+			parent->se.cacule_node.vruntime -= delta_vruntime;
+			parent = parent->parent;
+		}
+#else
+		cn->vruntime = (max_life_ns << 9) / old_hrrn_x;
+#endif
 	}
 }
 #endif /* CONFIG_CACULE_SCHED */
+
+#ifdef CONFIG_CACULE_RDB
+static void update_parents(struct sched_entity *se, u64 delta_fair)
+{
+	struct task_struct *parent = task_of(se)->parent;
+
+	while (parent->parent && parent->parent->pid > 2) {
+		parent->se.cacule_node.vruntime += delta_fair;
+		parent = parent->parent;
+	}
+}
+#endif
 
 /*
  * Update the current task's runtime statistics.
@@ -1077,6 +1128,11 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	delta_fair = calc_delta_fair(delta_exec, curr);
 	curr->vruntime += delta_fair;
 	curr->cacule_node.vruntime += delta_fair;
+
+#ifdef CONFIG_CACULE_RDB
+	update_parents(curr, delta_fair);
+#endif
+
 	normalize_lifetime(now, curr);
 #else
 	curr->vruntime += calc_delta_fair(delta_exec, curr);
