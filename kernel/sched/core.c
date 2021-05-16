@@ -4552,13 +4552,10 @@ void scheduler_tick(void)
 
 #if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
 	rq->ticks++;
-	if (rq->nr_running == 1 && rq->ticks < skip) {
-		rq->idle_balance = idle_cpu(cpu);
-		trigger_nohz_balancer_kick(rq);
-
+	if (rq->nr_running == 1 && rq->ticks < skip)
 		/* skip */
 		return;
-	}
+
 	rq->ticks = 0;
 #endif
 

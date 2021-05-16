@@ -1976,10 +1976,6 @@ extern void update_group_capacity(struct sched_domain *sd, int cpu);
 
 extern void trigger_load_balance(struct rq *rq);
 
-#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-extern void trigger_nohz_balancer_kick(struct rq *rq);
-#endif
-
 extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask, u32 flags);
 
 static inline struct task_struct *get_push_task(struct rq *rq)

@@ -10746,6 +10746,7 @@ static inline int find_new_ilb(void)
 	return nr_cpu_ids;
 }
 
+#if !defined(CONFIG_CACULE_RDB)
 /*
  * Kick a CPU to do the nohz balancing, if it is time for it. We pick any
  * idle CPU in the HK_FLAG_MISC housekeeping set (if there is one).
@@ -10896,6 +10897,7 @@ out:
 	if (flags)
 		kick_ilb(flags);
 }
+#endif /* CONFIG_CACULE_RDB */
 
 static void set_cpu_sd_state_busy(int cpu)
 {
@@ -11564,13 +11566,6 @@ void trigger_load_balance(struct rq *rq)
 }
 #endif
 
-#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-void trigger_nohz_balancer_kick(struct rq *rq)
-{
-	nohz_balancer_kick(rq);
-}
-#endif
-
 #ifdef CONFIG_CACULE_RDB
 static int
 idle_try_pull_any(struct cfs_rq *cfs_rq)
@@ -11708,8 +11703,6 @@ void trigger_load_balance(struct rq *rq)
 		idle_try_pull_any(&rq->cfs);
 	else
 		active_balance(rq);
-
-	nohz_balancer_kick(rq);
 }
 #endif
 
