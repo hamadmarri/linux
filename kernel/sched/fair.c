@@ -122,6 +122,11 @@ int __weak arch_asym_cpu_priority(int cpu)
 unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
 unsigned int __read_mostly interactivity_factor		= 32768;
 unsigned int __read_mostly interactivity_threshold	= 1000;
+
+unsigned int __read_mostly try_push_any_enable		= 0; // 0, 1
+unsigned int __read_mostly active_balance_guard		= 3; // 0-100 ms
+unsigned int __read_mostly average_vruntime_enable	= 0; // 0, 1
+unsigned int __read_mostly scale_down_hz_value		= 0; // 1-2000 hz
 #endif
 
 #ifdef CONFIG_CFS_BANDWIDTH
@@ -602,11 +607,9 @@ static u64 average_vruntime(struct cacule_node *cn)
 	u64 counter = 1;
 
 	p = p->parent;
-
 	while (p->parent && p->parent->pid > 2) {
 		sum += p->se.cacule_node.vruntime;
 		counter++;
-
 		p = p->parent;
 	}
 
@@ -627,7 +630,10 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	 */
 	l_se		= now - se->cacule_start_time;
 #ifdef CONFIG_CACULE_RDB
-	vr_se		= average_vruntime(se) | 1;
+	if (average_vruntime_enable)
+		vr_se	= average_vruntime(se) | 1;
+	else
+		vr_se	= se->vruntime | 1;
 #else
 	vr_se		= se->vruntime | 1;
 #endif
@@ -1082,9 +1088,11 @@ static void normalize_lifetime(u64 now, struct sched_entity *se)
 		cn->vruntime = (max_life_ns << 9) / old_hrrn_x;
 		delta_vruntime -= cn->vruntime;
 
-		while (parent->parent && parent->parent->pid > 2) {
-			parent->se.cacule_node.vruntime -= delta_vruntime;
-			parent = parent->parent;
+		if (average_vruntime_enable) {
+			while (parent->parent && parent->parent->pid > 2) {
+				parent->se.cacule_node.vruntime -= delta_vruntime;
+				parent = parent->parent;
+			}
 		}
 #else
 		cn->vruntime = (max_life_ns << 9) / old_hrrn_x;
@@ -1140,7 +1148,8 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->cacule_node.vruntime += delta_fair;
 
 #ifdef CONFIG_CACULE_RDB
-	update_parents(curr, delta_fair);
+	if (average_vruntime_enable)
+		update_parents(curr, delta_fair);
 #endif
 
 	normalize_lifetime(now, curr);
@@ -11686,6 +11695,56 @@ again:
 	}
 }
 
+static void try_pull_any(struct rq *this_rq)
+{
+	struct task_struct *p = NULL;
+	struct rq *src_rq;
+	int dst_cpu = cpu_of(this_rq);
+	int src_cpu;
+	struct rq_flags src_rf;
+	int cores_round = 1;
+
+again:
+	for_each_online_cpu(src_cpu) {
+
+		if (src_cpu == dst_cpu)
+			continue;
+
+		if (cores_round && !cpus_share_cache(src_cpu, dst_cpu))
+			continue;
+
+		src_rq = cpu_rq(src_cpu);
+
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
+			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)
+			continue;
+
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
+			|| src_rq->cfs.nr_running <= this_rq->cfs.nr_running)
+			goto next;
+
+		p = task_of(se_of(src_rq->cfs.head));
+
+		if (can_migrate_task(p, dst_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &src_rf, p, dst_cpu);
+			return;
+		}
+
+next:
+		rq_unlock(src_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+	}
+
+	if (cores_round) {
+		// now search for all cpus
+		cores_round = 0;
+		goto again;
+	}
+}
+
 static inline void
 active_balance(struct rq *rq)
 {
@@ -11693,16 +11752,29 @@ active_balance(struct rq *rq)
 
 	if (!cfs_rq->head || cfs_rq->nr_running < 2)
 		try_pull_higher_IS(&rq->cfs);
-	else
+	else if (try_push_any_enable)
 		try_push_any(rq);
+	else
+		try_pull_any(rq);
 }
 
 void trigger_load_balance(struct rq *rq)
 {
+	unsigned long interval = active_balance_guard;
+
+	if (active_balance_guard && time_before(jiffies, rq->next_balance))
+		return;
+
 	if (rq->idle_balance)
 		idle_try_pull_any(&rq->cfs);
 	else
 		active_balance(rq);
+
+	if (active_balance_guard) {
+		/* scale ms to jiffies */
+		interval = msecs_to_jiffies(interval);
+		rq->next_balance = jiffies + interval;
+	}
 }
 #endif
 

@@ -69,6 +69,10 @@
 #include <asm/unistd.h>
 #include <asm/mmu_context.h>
 
+#ifdef CONFIG_CACULE_RDB
+#include <linux/sched/sysctl.h>
+#endif
+
 static void __unhash_process(struct task_struct *p, bool group_dead)
 {
 	nr_threads--;
@@ -663,6 +667,21 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 	bool autoreap;
 	struct task_struct *p, *n;
 	LIST_HEAD(dead);
+
+#ifdef CONFIG_CACULE_RDB
+	struct task_struct *parent = tsk->parent;
+
+	if (average_vruntime_enable) {
+		while (parent->parent && parent->parent->pid > 2) {
+			if (parent->se.cacule_node.vruntime >= tsk->se.vruntime)
+				parent->se.cacule_node.vruntime -= tsk->se.vruntime;
+			else
+				parent->se.cacule_node.vruntime = 0;
+
+			parent = parent->parent;
+		}
+	}
+#endif
 
 	write_lock_irq(&tasklist_lock);
 	forget_original_parent(tsk, &dead);

@@ -37,6 +37,13 @@ extern unsigned int interactivity_threshold;
 extern unsigned int cacule_max_lifetime;
 #endif
 
+#ifdef CONFIG_CACULE_RDB
+extern unsigned int try_push_any_enable;
+extern unsigned int active_balance_guard;
+extern unsigned int average_vruntime_enable;
+extern unsigned int scale_down_hz_value;
+#endif
+
 enum sched_tunable_scaling {
 	SCHED_TUNABLESCALING_NONE,
 	SCHED_TUNABLESCALING_LOG,

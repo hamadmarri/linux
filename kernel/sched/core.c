@@ -4542,21 +4542,26 @@ void scheduler_tick(void)
 	unsigned long thermal_pressure;
 
 #if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-	int scale_down_hz = 10;
+	int scale_down_hz = scale_down_hz_value;
 	/* skip HZ/scale_down_hz ticks */
-	int skip = HZ / scale_down_hz;
+	int skip = 0;
+
+	if (scale_down_hz_value)
+		skip = HZ / scale_down_hz;
 #endif
 
 	arch_scale_freq_tick();
 	sched_clock_tick();
 
 #if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-	rq->ticks++;
-	if (rq->nr_running == 1 && rq->ticks < skip)
-		/* skip */
-		return;
+	if (scale_down_hz_value) {
+		rq->ticks++;
+		if (rq->nr_running == 1 && rq->ticks < skip)
+			/* skip */
+			return;
 
-	rq->ticks = 0;
+		rq->ticks = 0;
+	}
 #endif
 
 	rq_lock(rq, &rf);
