@@ -11752,10 +11752,20 @@ active_balance(struct rq *rq)
 
 	if (!cfs_rq->head || cfs_rq->nr_running < 2)
 		try_pull_higher_IS(&rq->cfs);
-	else if (try_push_any_enable)
-		try_push_any(rq);
-	else
+	else if (try_push_any_enable == 0)
 		try_pull_any(rq);
+	else if (try_push_any_enable == 1)
+		try_push_any(rq);
+	else  if (try_push_any_enable == 2)
+	{
+		try_push_any(rq);
+		try_pull_any(rq);
+	}
+	else  if (try_push_any_enable == 3)
+	{
+		try_pull_any(rq);
+		try_push_any(rq);
+	}
 }
 
 void trigger_load_balance(struct rq *rq)
