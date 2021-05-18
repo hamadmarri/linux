@@ -681,6 +681,9 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 			parent = parent->parent;
 		}
 	}
+
+	if (parent->nr_forks)
+		parent->nr_forks--;
 #endif
 
 	write_lock_irq(&tasklist_lock);

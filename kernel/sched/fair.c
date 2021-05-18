@@ -603,17 +603,20 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 static u64 average_vruntime(struct cacule_node *cn)
 {
 	struct task_struct *p = task_of(se_of(cn));
-	u64 sum = p->se.cacule_node.vruntime;
-	u64 counter = 1;
+	u64 average = p->se.cacule_node.vruntime;
+	u64 group_vr, nr_forks;
 
 	p = p->parent;
 	while (p->parent && p->parent->pid > 2) {
-		sum += p->se.cacule_node.vruntime;
-		counter++;
+		group_vr = p->se.cacule_node.vruntime;
+		nr_forks = p->nr_forks ? p->nr_forks : 1;
+
+		average += group_vr - (group_vr / nr_forks);
+
 		p = p->parent;
 	}
 
-	return sum / counter;
+	return average;
 }
 #endif
 
@@ -11852,6 +11855,10 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		update_curr(cfs_rq);
 
 	rq_unlock(rq, &rf);
+
+#ifdef CONFIG_CACULE_RDB
+	p->parent->nr_forks++;
+#endif
 }
 #else
 static void task_fork_fair(struct task_struct *p)
