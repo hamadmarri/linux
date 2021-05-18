@@ -762,7 +762,7 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 		cfs_rq->tail = NULL;
 
 #ifdef CONFIG_CACULE_RDB
-	WRITE_ONCE(cfs_rq->IS_head, 0);
+	WRITE_ONCE(cfs_rq->IS_head, ~0);
 #endif
 
 	} else if (se == cfs_rq->head) {
@@ -7703,7 +7703,7 @@ simple:
 		unsigned int IS_head = calc_interactivity(sched_clock(), cfs_rq->head);
 		WRITE_ONCE(cfs_rq->IS_head, IS_head);
 	} else {
-		WRITE_ONCE(cfs_rq->IS_head, 0);
+		WRITE_ONCE(cfs_rq->IS_head, ~0);
 	}
 #else
 	do {
@@ -7734,7 +7734,7 @@ done: __maybe_unused;
 
 idle:
 #ifdef CONFIG_CACULE_RDB
-	WRITE_ONCE(cfs_rq->IS_head, 0);
+	WRITE_ONCE(cfs_rq->IS_head, ~0);
 #endif
 
 	if (!rf)
@@ -11278,7 +11278,7 @@ find_max_IS_rq(struct cfs_rq *cfs_rq, int dst_cpu)
 
 		local_IS = READ_ONCE(tmp_rq->cfs.IS_head);
 
-		if (local_IS > max_IS) {
+		if (local_IS < max_IS) {
 			max_IS = local_IS;
 			max_rq = tmp_rq;
 		}
