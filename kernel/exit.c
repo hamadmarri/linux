@@ -673,8 +673,8 @@ static void exit_notify(struct task_struct *tsk, int group_dead)
 
 	if (average_vruntime_enable) {
 		while (parent->parent && parent->parent->pid > 2) {
-			if (parent->se.cacule_node.vruntime >= tsk->se.vruntime)
-				parent->se.cacule_node.vruntime -= tsk->se.vruntime;
+			if (parent->se.cacule_node.vruntime >= tsk->se.cacule_node.vruntime)
+				parent->se.cacule_node.vruntime -= tsk->se.cacule_node.vruntime;
 			else
 				parent->se.cacule_node.vruntime = 0;
 
