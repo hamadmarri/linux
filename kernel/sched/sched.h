@@ -953,11 +953,6 @@ struct rq {
 	struct cfs_rq		cfs;
 	struct rt_rq		rt;
 	struct dl_rq		dl;
-
-#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-	unsigned int		ticks;
-#endif
-
 #ifdef CONFIG_FAIR_GROUP_SCHED
 	/* list of leaf cfs_rq on this CPU: */
 	struct list_head	leaf_cfs_rq_list;

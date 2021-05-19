@@ -124,6 +124,10 @@ unsigned int __read_mostly interactivity_factor		= 32768;
 unsigned int __read_mostly interactivity_threshold	= 1000;
 #endif
 
+#ifdef CONFIG_RDB_TASKS_GROUP
+unsigned int __read_mostly average_vruntime_enabled	= 1;
+#endif
+
 #ifdef CONFIG_CFS_BANDWIDTH
 /*
  * Amount of runtime to allocate from global (tg) to local (per-cfs_rq) pool
@@ -594,23 +598,24 @@ static inline bool __entity_less(struct rb_node *a, const struct rb_node *b)
 }
 #endif /* CONFIG_CACULE_SCHED */
 
-#ifdef CONFIG_CACULE_RDB
+#ifdef CONFIG_RDB_TASKS_GROUP
 static u64 average_vruntime(struct cacule_node *cn)
 {
 	struct task_struct *p = task_of(se_of(cn));
-	u64 sum = p->se.cacule_node.vruntime;
-	u64 counter = 1;
+	u64 average = p->se.cacule_node.vruntime;
+	u64 group_vr, nr_forks;
 
 	p = p->parent;
-
 	while (p->parent && p->parent->pid > 2) {
-		sum += p->se.cacule_node.vruntime;
-		counter++;
+		group_vr = p->se.cacule_node.vruntime;
+		nr_forks = p->nr_forks ? p->nr_forks : 1;
+
+		average += group_vr - (group_vr / nr_forks);
 
 		p = p->parent;
 	}
 
-	return sum / counter;
+	return average;
 }
 #endif
 
@@ -626,11 +631,14 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	 * make sure that the least sig. bit is 1
 	 */
 	l_se		= now - se->cacule_start_time;
-#ifdef CONFIG_CACULE_RDB
-	vr_se		= average_vruntime(se) | 1;
-#else
-	vr_se		= se->vruntime | 1;
+
+#ifdef CONFIG_RDB_TASKS_GROUP
+	if (average_vruntime_enabled)
+		vr_se	= average_vruntime(se) | 1;
+	else
 #endif
+		vr_se	= se->vruntime | 1;
+
 	u64_factor_m	= interactivity_factor;
 	_2m		= u64_factor_m << 1;
 
@@ -756,7 +764,7 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 		cfs_rq->tail = NULL;
 
 #ifdef CONFIG_CACULE_RDB
-	WRITE_ONCE(cfs_rq->IS_head, 0);
+	WRITE_ONCE(cfs_rq->IS_head, ~0);
 #endif
 
 	} else if (se == cfs_rq->head) {
@@ -1052,7 +1060,7 @@ static void normalize_lifetime(u64 now, struct sched_entity *se)
 	struct cacule_node *cn = &se->cacule_node;
 	u64 max_life_ns, life_time;
 	s64 diff;
-#ifdef CONFIG_CACULE_RDB
+#ifdef CONFIG_RDB_TASKS_GROUP
 	u64 delta_vruntime;
 	struct task_struct *parent = task_of(se)->parent;
 #endif
@@ -1077,10 +1085,13 @@ static void normalize_lifetime(u64 now, struct sched_entity *se)
 		if (old_hrrn_x == 0) old_hrrn_x = 1;
 
 		// reset vruntime based on old hrrn ratio
-#ifdef CONFIG_CACULE_RDB
+#ifdef CONFIG_RDB_TASKS_GROUP
 		delta_vruntime = cn->vruntime;
 		cn->vruntime = (max_life_ns << 9) / old_hrrn_x;
 		delta_vruntime -= cn->vruntime;
+
+		if (!average_vruntime_enabled)
+			return;
 
 		while (parent->parent && parent->parent->pid > 2) {
 			parent->se.cacule_node.vruntime -= delta_vruntime;
@@ -1093,7 +1104,7 @@ static void normalize_lifetime(u64 now, struct sched_entity *se)
 }
 #endif /* CONFIG_CACULE_SCHED */
 
-#ifdef CONFIG_CACULE_RDB
+#ifdef CONFIG_RDB_TASKS_GROUP
 static void update_parents(struct sched_entity *se, u64 delta_fair)
 {
 	struct task_struct *parent = task_of(se)->parent;
@@ -1139,8 +1150,9 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	curr->vruntime += delta_fair;
 	curr->cacule_node.vruntime += delta_fair;
 
-#ifdef CONFIG_CACULE_RDB
-	update_parents(curr, delta_fair);
+#ifdef CONFIG_RDB_TASKS_GROUP
+	if (average_vruntime_enabled)
+		update_parents(curr, delta_fair);
 #endif
 
 	normalize_lifetime(now, curr);
@@ -7694,7 +7706,7 @@ simple:
 		unsigned int IS_head = calc_interactivity(sched_clock(), cfs_rq->head);
 		WRITE_ONCE(cfs_rq->IS_head, IS_head);
 	} else {
-		WRITE_ONCE(cfs_rq->IS_head, 0);
+		WRITE_ONCE(cfs_rq->IS_head, ~0);
 	}
 #else
 	do {
@@ -7725,7 +7737,7 @@ done: __maybe_unused;
 
 idle:
 #ifdef CONFIG_CACULE_RDB
-	WRITE_ONCE(cfs_rq->IS_head, 0);
+	WRITE_ONCE(cfs_rq->IS_head, ~0);
 #endif
 
 	if (!rf)
@@ -11269,7 +11281,7 @@ find_max_IS_rq(struct cfs_rq *cfs_rq, int dst_cpu)
 
 		local_IS = READ_ONCE(tmp_rq->cfs.IS_head);
 
-		if (local_IS > max_IS) {
+		if (local_IS < max_IS) {
 			max_IS = local_IS;
 			max_rq = tmp_rq;
 		}
@@ -11686,6 +11698,57 @@ again:
 	}
 }
 
+static void try_pull_any(struct rq *this_rq)
+{
+	struct task_struct *p = NULL;
+	struct rq *src_rq;
+	int dst_cpu = cpu_of(this_rq);
+	int src_cpu;
+	struct rq_flags src_rf;
+	int cores_round = 1;
+	unsigned int this_head = this_rq->cfs.IS_head;
+
+again:
+	for_each_online_cpu(src_cpu) {
+
+		if (src_cpu == dst_cpu)
+			continue;
+
+		if (cores_round && !cpus_share_cache(src_cpu, dst_cpu))
+			continue;
+
+		src_rq = cpu_rq(src_cpu);
+
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
+                    || READ_ONCE(src_rq->cfs.IS_head) >= this_head)
+			continue;
+
+		rq_lock_irqsave(src_rq, &src_rf);
+		update_rq_clock(src_rq);
+
+		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head)
+                    || src_rq->cfs.IS_head >= this_head)
+			goto next;
+
+		p = task_of(se_of(src_rq->cfs.head));
+
+		if (can_migrate_task(p, dst_cpu, src_rq)) {
+			pull_from_unlock(this_rq, src_rq, &src_rf, p, dst_cpu);
+			return;
+		}
+
+next:
+		rq_unlock(src_rq, &src_rf);
+		local_irq_restore(src_rf.flags);
+	}
+
+	if (cores_round) {
+		// now search for all cpus
+		cores_round = 0;
+		goto again;
+	}
+}
+
 static inline void
 active_balance(struct rq *rq)
 {
@@ -11693,16 +11756,32 @@ active_balance(struct rq *rq)
 
 	if (!cfs_rq->head || cfs_rq->nr_running < 2)
 		try_pull_higher_IS(&rq->cfs);
-	else
+	else {
 		try_push_any(rq);
+		try_pull_any(rq);
+	}
 }
 
 void trigger_load_balance(struct rq *rq)
 {
+	unsigned long interval;
+
+#ifdef CONFIG_RDB_INTERVAL
+	if (time_before(jiffies, rq->next_balance))
+		return;
+#endif
+
 	if (rq->idle_balance)
 		idle_try_pull_any(&rq->cfs);
-	else
+	else {
 		active_balance(rq);
+
+#ifdef CONFIG_RDB_INTERVAL
+		/* scale ms to jiffies */
+		interval = msecs_to_jiffies(CONFIG_RDB_INTERVAL);
+		rq->next_balance = jiffies + interval;
+#endif
+	}
 }
 #endif
 
@@ -11770,6 +11849,10 @@ static void task_tick_fair(struct rq *rq, struct task_struct *curr, int queued)
 		update_curr(cfs_rq);
 
 	rq_unlock(rq, &rf);
+
+#ifdef CONFIG_RDB_TASKS_GROUP
+	p->parent->nr_forks++;
+#endif
 }
 #else
 static void task_fork_fair(struct task_struct *p)

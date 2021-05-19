@@ -3558,6 +3558,10 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 
 #ifdef CONFIG_CACULE_SCHED
 	p->se.cacule_node.vruntime	= 0;
+
+#ifdef CONFIG_RDB_TASKS_GROUP
+	p->nr_forks			= 0;
+#endif
 #endif
 
 	INIT_LIST_HEAD(&p->se.group_node);
@@ -4541,29 +4545,18 @@ void scheduler_tick(void)
 	struct rq_flags rf;
 	unsigned long thermal_pressure;
 
-#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-	int scale_down_hz = 10;
-	/* skip HZ/scale_down_hz ticks */
-	int skip = HZ / scale_down_hz;
-#endif
-
 	arch_scale_freq_tick();
 	sched_clock_tick();
-
-#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-	rq->ticks++;
-	if (rq->nr_running == 1 && rq->ticks < skip)
-		/* skip */
-		return;
-
-	rq->ticks = 0;
-#endif
 
 	rq_lock(rq, &rf);
 
 	update_rq_clock(rq);
 	thermal_pressure = arch_scale_thermal_pressure(cpu_of(rq));
+
+#if !defined(CONFIG_CACULE_RDB)
 	update_thermal_load_avg(rq_clock_thermal(rq), rq, thermal_pressure);
+#endif
+
 	curr->sched_class->task_tick(rq, curr, 0);
 	calc_global_load_tick(rq);
 	psi_task_tick(rq);
@@ -8196,11 +8189,6 @@ void __init sched_init(void)
 		init_cfs_rq(&rq->cfs);
 		init_rt_rq(&rq->rt);
 		init_dl_rq(&rq->dl);
-
-#if defined(CONFIG_CACULE_RDB) && !defined(CONFIG_NO_HZ_FULL)
-	rq->ticks = 0;
-#endif
-
 #ifdef CONFIG_FAIR_GROUP_SCHED
 		INIT_LIST_HEAD(&rq->leaf_cfs_rq_list);
 		rq->tmp_alone_branch = &rq->leaf_cfs_rq_list;
