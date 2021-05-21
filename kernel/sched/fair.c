@@ -5900,6 +5900,20 @@ static int sched_idle_cpu(int cpu)
 }
 #endif
 
+#ifdef CONFIG_CACULE_RDB
+static inline void add_to_tasks_group(struct task_struct *p)
+{
+	struct task_struct *parent = p->parent;
+
+	while (parent->parent && parent->parent->pid > 2) {
+		parent->se.cacule_node.vruntime += p->se.cacule_node.vruntime;
+		parent = parent->parent;
+	}
+
+	parent->nr_forks++;
+}
+#endif
+
 /*
  * The enqueue_task method is called before nr_running is
  * increased. Here we update the fair scheduling stats and
@@ -5933,6 +5947,9 @@ enqueue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 
 #ifdef CONFIG_CACULE_RDB
 	if (!se->on_rq) {
+		if (average_vruntime_enable)
+			add_to_tasks_group(p);
+
 		cfs_rq = cfs_rq_of(se);
 		enqueue_entity(cfs_rq, se, flags);
 		cfs_rq->h_nr_running++;
@@ -6024,6 +6041,25 @@ enqueue_throttle:
 static void set_next_buddy(struct sched_entity *se);
 #endif
 
+#ifdef CONFIG_CACULE_RDB
+static inline void remove_from_tasks_group(struct task_struct *p)
+{
+	struct task_struct *parent = p->parent;
+
+	while (parent->parent && parent->parent->pid > 2) {
+		if (parent->se.cacule_node.vruntime >= p->se.cacule_node.vruntime)
+			parent->se.cacule_node.vruntime -= p->se.cacule_node.vruntime;
+		else
+			parent->se.cacule_node.vruntime = 0;
+
+		parent = parent->parent;
+	}
+
+	if (parent->nr_forks)
+		parent->nr_forks--;
+}
+#endif
+
 /*
  * The dequeue_task method is called before nr_running is
  * decreased. We remove the task from the rbtree and
@@ -6036,6 +6072,9 @@ static void dequeue_task_fair(struct rq *rq, struct task_struct *p, int flags)
 	int task_sleep = flags & DEQUEUE_SLEEP;
 
 #ifdef CONFIG_CACULE_RDB
+	if (average_vruntime_enable)
+		remove_from_tasks_group(p);
+
 	cfs_rq = cfs_rq_of(se);
 	dequeue_entity(cfs_rq, se, flags);
 	cfs_rq->h_nr_running--;
