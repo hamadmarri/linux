@@ -7538,6 +7538,7 @@ again:
 
 		se = pick_next_entity(cfs_rq, curr);
 		cfs_rq = group_cfs_rq(se);
+		update_IS_head(cfs_rq);
 	} while (cfs_rq);
 
 	p = task_of(se);
@@ -7566,7 +7567,6 @@ again:
 
 		put_prev_entity(cfs_rq, pse);
 		set_next_entity(cfs_rq, se);
-		//update_IS_head(cfs_rq);
 	}
 
 	goto done;
@@ -7579,7 +7579,6 @@ simple:
 		se = pick_next_entity(cfs_rq, NULL);
 		set_next_entity(cfs_rq, se);
 		cfs_rq = group_cfs_rq(se);
-
 		update_IS_head(cfs_rq);
 	} while (cfs_rq);
 
@@ -11144,6 +11143,24 @@ find_max_IS_rq(struct cfs_rq *cfs_rq, int dst_cpu)
 	return max_rq;
 }
 
+static struct task_struct* rdb_task_of(struct cfs_rq *cfs_rq)
+{
+	struct task_struct *p = NULL;
+	struct cfs_rq *current_cfs = cfs_rq;
+	struct sched_entity *se;
+
+	while (!p) {
+		se = se_of(current_cfs->head);
+
+		if (entity_is_task(se))
+			return task_of(se);
+
+		current_cfs = group_cfs_rq(se);
+	}
+
+	return p;
+}
+
 static int try_pull_from(struct rq *src_rq, struct rq *this_rq)
 {
 	struct rq_flags rf;
@@ -11153,11 +11170,8 @@ static int try_pull_from(struct rq *src_rq, struct rq *this_rq)
 	rq_lock_irqsave(src_rq, &rf);
 	update_rq_clock(src_rq);
 
-	if (!entity_is_task(se_of(src_rq->cfs.head)))
-		goto unlock;
-
 	if (src_rq->cfs.head && src_rq->cfs.nr_running > 1) {
-		p = task_of(se_of(src_rq->cfs.head));
+		p = rdb_task_of(&src_rq->cfs);
 
 		if (can_migrate_task(p, dst_cpu, src_rq)) {
 			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
@@ -11165,7 +11179,6 @@ static int try_pull_from(struct rq *src_rq, struct rq *this_rq)
 		}
 	}
 
-unlock:
 	rq_unlock(src_rq, &rf);
 	local_irq_restore(rf.flags);
 
@@ -11230,10 +11243,7 @@ again:
 		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head))
 			goto next;
 
-		if (!entity_is_task(se_of(src_rq->cfs.head)))
-			goto next;
-
-		p = task_of(se_of(src_rq->cfs.head));
+		p = rdb_task_of(&src_rq->cfs);
 
 		if (can_migrate_task(p, this_cpu, src_rq)) {
 			pull_from_unlock(this_rq, src_rq, &src_rf, p, this_cpu);
@@ -11468,10 +11478,7 @@ again:
 		if (src_rq->cfs.nr_running < 2 || !(src_rq->cfs.head))
 			goto next;
 
-		if (!entity_is_task(se_of(src_rq->cfs.head)))
-			goto next;
-
-		p = task_of(se_of(src_rq->cfs.head));
+		p = rdb_task_of(&src_rq->cfs);
 
 		if (can_migrate_task(p, dst_cpu, src_rq)) {
 			pull_from_unlock(this_rq, src_rq, &rf, p, dst_cpu);
@@ -11547,7 +11554,7 @@ again:
 			return;
 		}
 
-		p = task_of(se_of(this_rq->cfs.head));
+		p = rdb_task_of(&this_rq->cfs);
 
 		if (can_migrate_task(p, dst_cpu, this_rq)) {
 			push_to_unlock(this_rq, dst_rq, p, dst_cpu);
@@ -11597,10 +11604,7 @@ again:
                     || src_rq->cfs.IS_head >= this_head)
 			goto next;
 
-		if (!entity_is_task(se_of(src_rq->cfs.head)))
-			goto next;
-
-		p = task_of(se_of(src_rq->cfs.head));
+		p = rdb_task_of(&src_rq->cfs);
 
 		if (can_migrate_task(p, dst_cpu, src_rq)) {
 			pull_from_unlock(this_rq, src_rq, &src_rf, p, dst_cpu);
