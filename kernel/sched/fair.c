@@ -6104,6 +6104,7 @@ static int wake_wide(struct task_struct *p)
 }
 #endif /* CONFIG_CACULE_SCHED */
 
+#if !defined(CONFIG_CACULE_RDB)
 /*
  * The purpose of wake_affine() is to quickly determine on which CPU we can run
  * soonest. For the purpose of speed we only consider the waking and previous
@@ -6205,6 +6206,7 @@ static int wake_affine(struct sched_domain *sd, struct task_struct *p,
 	schedstat_inc(p->se.statistics.nr_wakeups_affine);
 	return target;
 }
+#endif
 
 static struct sched_group *
 find_idlest_group(struct sched_domain *sd, struct task_struct *p, int this_cpu);
@@ -9694,6 +9696,7 @@ static inline void calculate_imbalance(struct lb_env *env, struct sd_lb_stats *s
  *            different in groups.
  */
 
+#if !defined(CONFIG_CACULE_RDB)
 /**
  * find_busiest_group - Returns the busiest group within the sched_domain
  * if there is an imbalance.
@@ -9962,6 +9965,7 @@ static struct rq *find_busiest_queue(struct lb_env *env,
 
 	return busiest;
 }
+#endif
 
 /*
  * Max backoff if we encounter pinned tasks. Pretty arbitrary value, but
@@ -10616,6 +10620,7 @@ static inline int find_new_ilb(void)
 	return nr_cpu_ids;
 }
 
+#if !defined(CONFIG_CACULE_RDB)
 /*
  * Kick a CPU to do the nohz balancing, if it is time for it. We pick any
  * idle CPU in the HK_FLAG_MISC housekeeping set (if there is one).
@@ -10766,6 +10771,7 @@ out:
 	if (flags)
 		kick_ilb(flags);
 }
+#endif
 
 static void set_cpu_sd_state_busy(int cpu)
 {
