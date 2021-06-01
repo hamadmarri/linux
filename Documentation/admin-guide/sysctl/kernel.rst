@@ -1060,6 +1060,10 @@ compilation sees a 1% slowdown, other systems and workloads may vary.
   1: kernel stack erasing is enabled (default), it is performed before
      returning to the userspace at the end of syscalls.
 
+sched_interactivity_factor (CacULE scheduler only)
+==================================================
+Sets the value *m* for interactivity score calculations. See
+Figure 1 in https://web.cs.ucdavis.edu/~roper/ecs150/ULE.pdf
 
 tainted
 =======
