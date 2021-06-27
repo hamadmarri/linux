@@ -640,6 +640,14 @@ entity_before_cached(u64 now, unsigned int score_curr, struct cacule_node *se)
 	unsigned int score_se;
 	int diff;
 
+	/*
+	 * if se has idle class, then no need to
+	 * calculate, since we are sure that score_curr
+	 * is a score for non idle class task
+	 */
+	if (task_has_idle_policy(task_of(se_of(se))))
+		return -1;
+
 	score_se	= calc_interactivity(now, se);
 	diff		= score_se - score_curr;
 
@@ -677,10 +685,12 @@ entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
  */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 {
+	struct task_struct *p = task_of(_se);
 	struct cacule_node *se = &(_se->cacule_node);
 	struct cacule_node *iter, *next = NULL;
 	u64 now = sched_clock();
 	unsigned int score_se = calc_interactivity(now, se);
+	int is_idle_task = task_has_idle_policy(p);
 
 	se->next = NULL;
 	se->prev = NULL;
@@ -690,6 +700,15 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 		// start from tail
 		iter = cfs_rq->tail;
 
+		/*
+		 * if this task has idle class, then
+		 * push it to the tail right away
+		 */
+		if (is_idle_task)
+			goto to_tail;
+
+		/* here we know that this task isn't idle clas */
+
 		// does se have higher IS than iter?
 		while (iter && entity_before_cached(now, score_se, iter) == -1) {
 			next = iter;
@@ -698,6 +717,7 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 
 		// se in tail position
 		if (iter == cfs_rq->tail) {
+to_tail:
 			cfs_rq->tail->next	= se;
 			se->prev		= cfs_rq->tail;
 
