@@ -634,6 +634,11 @@ static inline int is_interactive(struct cacule_node *cn)
 	return calc_interactivity(sched_clock(), cn) < interactivity_threshold;
 }
 
+static inline int cn_has_idle_policy(struct cacule_node *se)
+{
+	return task_has_idle_policy(task_of(se_of(se)));
+}
+
 static inline int
 entity_before_cached(u64 now, unsigned int score_curr, struct cacule_node *se)
 {
@@ -645,7 +650,7 @@ entity_before_cached(u64 now, unsigned int score_curr, struct cacule_node *se)
 	 * calculate, since we are sure that score_curr
 	 * is a score for non idle class task
 	 */
-	if (task_has_idle_policy(task_of(se_of(se))))
+	if (cn_has_idle_policy(se))
 		return -1;
 
 	score_se	= calc_interactivity(now, se);
@@ -668,6 +673,16 @@ entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
 {
 	unsigned int score_curr, score_se;
 	int diff;
+	int is_curr_idle = cn_has_idle_policy(curr);
+	int is_se_idle   = cn_has_idle_policy(se);
+
+	/* if curr is normal but se is idle class, then no */
+	if (!is_curr_idle && is_se_idle)
+		return -1;
+
+	/* if curr is idle class and se is normal, then yes */
+	if (is_curr_idle && !is_se_idle)
+		return 1;
 
 	score_curr	= calc_interactivity(now, curr);
 	score_se	= calc_interactivity(now, se);
