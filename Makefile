@@ -1,13 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
 VERSION = 5
 PATCHLEVEL = 12
-<<<<<<< HEAD
-SUBLEVEL = 10
-EXTRAVERSION = -rc1
-=======
 SUBLEVEL = 13
 EXTRAVERSION =
->>>>>>> linux/linux-5.12.y
 NAME = Frozen Wasteland
 
 # *DOCUMENTATION*
