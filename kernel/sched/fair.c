@@ -700,12 +700,11 @@ entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
  */
 static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 {
-	struct task_struct *p = task_of(_se);
 	struct cacule_node *se = &(_se->cacule_node);
 	struct cacule_node *iter, *next = NULL;
 	u64 now = sched_clock();
 	unsigned int score_se = calc_interactivity(now, se);
-	int is_idle_task = task_has_idle_policy(p);
+	int is_idle_task = cn_has_idle_policy(se);
 
 	se->next = NULL;
 	se->prev = NULL;
