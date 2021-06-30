@@ -4770,7 +4770,9 @@ static void sched_tick_remote(struct work_struct *work)
 	struct rq *rq = cpu_rq(cpu);
 	struct task_struct *curr;
 	struct rq_flags rf;
+#if !defined(CONFIG_CACULE_SCHED)
 	u64 delta;
+#endif
 	int os;
 
 	/*
