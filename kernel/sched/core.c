@@ -72,6 +72,10 @@ const_debug unsigned int sysctl_sched_nr_migrate = 32;
  */
 unsigned int sysctl_sched_rt_period = 1000000;
 
+#ifdef CONFIG_CACULE_SCHED
+int __read_mostly sched_yield_type = 1;
+#endif
+
 __read_mostly int scheduler_running;
 
 /*
@@ -6106,6 +6110,15 @@ static void do_sched_yield(void)
 	struct rq_flags rf;
 	struct rq *rq;
 
+#ifdef CONFIG_CACULE_SCHED
+	struct task_struct *curr = current;
+	struct cacule_node *cn = &curr->se.cacule_node;
+
+	if (sched_yield_type) {
+		cn->vruntime |= YIELD_MARK;
+		return;
+	}
+#endif
 	rq = this_rq_lock_irq(&rf);
 
 	schedstat_inc(rq->yld_count);
@@ -6215,6 +6228,12 @@ int __sched yield_to(struct task_struct *p, bool preempt)
 	struct rq *rq, *p_rq;
 	unsigned long flags;
 	int yielded = 0;
+
+// not sure about yield_to
+//#ifdef CONFIG_CACULE_SCHED
+	//if (sched_yield_type)
+		//return 0;
+//#endif
 
 	local_irq_save(flags);
 	rq = this_rq();
