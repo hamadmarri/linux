@@ -11158,14 +11158,14 @@ static struct task_struct* rdb_task_of(struct cfs_rq *cfs_rq)
 	struct cfs_rq *current_cfs = cfs_rq;
 	struct sched_entity *se;
 
-	while (!p) {
+	do {
 		se = se_of(current_cfs->head);
 
 		if (entity_is_task(se))
-			return task_of(se);
+			p = task_of(se);
 
 		current_cfs = group_cfs_rq(se);
-	}
+	} while (current_cfs);
 
 	return p;
 }
