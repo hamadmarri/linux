@@ -8498,6 +8498,7 @@ static inline void update_blocked_load_tick(struct rq *rq) {}
 static inline void update_blocked_load_status(struct rq *rq, bool has_blocked) {}
 #endif
 
+#if !defined(CONFIG_CACULE_RDB)
 static bool __update_blocked_others(struct rq *rq, bool *done)
 {
 	const struct sched_class *curr_class;
@@ -8523,9 +8524,11 @@ static bool __update_blocked_others(struct rq *rq, bool *done)
 
 	return decayed;
 }
+#endif
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
 
+#if !defined(CONFIG_CACULE_RDB)
 static bool __update_blocked_fair(struct rq *rq, bool *done)
 {
 	struct cfs_rq *cfs_rq, *pos;
@@ -8565,6 +8568,7 @@ static bool __update_blocked_fair(struct rq *rq, bool *done)
 
 	return decayed;
 }
+#endif
 
 /*
  * Compute the hierarchical load factor for cfs_rq and all its ascendants.
@@ -8631,6 +8635,7 @@ static unsigned long task_h_load(struct task_struct *p)
 }
 #endif
 
+#if !defined(CONFIG_CACULE_RDB)
 static void update_blocked_averages(int cpu)
 {
 	bool decayed = false, done = true;
@@ -8649,6 +8654,7 @@ static void update_blocked_averages(int cpu)
 		cpufreq_update_util(rq, 0);
 	rq_unlock_irqrestore(rq, &rf);
 }
+#endif
 
 /********** Helpers for find_busiest_group ************************/
 
@@ -10620,12 +10626,12 @@ out:
 		rq->next_balance = next_balance;
 
 }
+#endif
 
 static inline int on_null_domain(struct rq *rq)
 {
 	return unlikely(!rcu_dereference_sched(rq->sd));
 }
-#endif
 
 #ifdef CONFIG_NO_HZ_COMMON
 /*
@@ -10913,6 +10919,7 @@ out:
 	WRITE_ONCE(nohz.has_blocked, 1);
 }
 
+#if !defined(CONFIG_CACULE_RDB)
 static bool update_nohz_stats(struct rq *rq)
 {
 	unsigned int cpu = rq->cpu;
@@ -10931,7 +10938,6 @@ static bool update_nohz_stats(struct rq *rq)
 	return rq->has_blocked_load;
 }
 
-#if !defined(CONFIG_CACULE_RDB)
 /*
  * Internal function that runs load balance for all idle cpus. The load balance
  * can be a simple update of blocked load or a complete load balance with
