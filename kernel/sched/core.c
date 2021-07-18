@@ -8129,8 +8129,11 @@ void __init sched_init(void)
 	BUG_ON(&dl_sched_class + 1 != &stop_sched_class);
 #endif
 
-#ifdef CONFIG_CACULE_SCHED
-	printk(KERN_INFO "CacULE CPU scheduler v5.13-r2 by Hamad Al Marri.");
+#ifdef CONFIG_CACULE_RDB
+	/*
+	 * This patch is on top cacule-5.13.patch
+	 */
+	printk(KERN_INFO "CacULE CPU scheduler (RDB) v5.13 by Hamad Al Marri.");
 #endif
 
 	wait_bit_init();
