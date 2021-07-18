@@ -3562,10 +3562,6 @@ static void __sched_fork(unsigned long clone_flags, struct task_struct *p)
 
 #ifdef CONFIG_CACULE_SCHED
 	p->se.cacule_node.vruntime	= 0;
-
-#ifdef CONFIG_RDB_TASKS_GROUP
-	p->nr_forks			= 0;
-#endif
 #endif
 
 	INIT_LIST_HEAD(&p->se.group_node);

@@ -124,10 +124,6 @@ unsigned int __read_mostly interactivity_factor		= 32768;
 unsigned int __read_mostly interactivity_threshold	= 1000;
 #endif
 
-#ifdef CONFIG_RDB_TASKS_GROUP
-unsigned int __read_mostly average_vruntime_enabled	= 1;
-#endif
-
 #ifdef CONFIG_CFS_BANDWIDTH
 /*
  * Amount of runtime to allocate from global (tg) to local (per-cfs_rq) pool

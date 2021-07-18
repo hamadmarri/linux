@@ -875,18 +875,6 @@ config RDB_INTERVAL
 
 	  If in doubt, use the default value.
 
-config RDB_TASKS_GROUP
-	bool "RDB task groups"
-	default n
-	depends on CACULE_RDB
-	help
-	  A mechanism for RDB tasks grouping to enhance interactivity. Since 
-	  RDB does not support AUTOGROUP, this is a similar feature. Tasks are
-	  grouped based on fork hierarchy. For more information:
-	  https://github.com/hamadmarri/cacule-cpu-scheduler/tree/master/patches/CacULE/RDB
-
-	  If unsure, say N.
-
 #
 # For architectures that want to enable the support for NUMA-affine scheduler
 # balancing logic:
@@ -1270,6 +1258,7 @@ config SCHED_AUTOGROUP
 	select CGROUPS
 	select CGROUP_SCHED
 	select FAIR_GROUP_SCHED
+	default y
 	help
 	  This option optimizes the scheduler for common desktop workloads by
 	  automatically creating and populating task groups.  This separation
