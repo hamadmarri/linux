@@ -11042,6 +11042,7 @@ abort:
 		WRITE_ONCE(nohz.has_blocked, 1);
 }
 
+#if !defined(CONFIG_CACULE_RDB)
 /*
  * In CONFIG_NO_HZ_COMMON case, the idle balance kickee will do the
  * rebalancing for all the cpus for whom scheduler ticks are stopped.
@@ -11062,6 +11063,7 @@ static bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 
 	return true;
 }
+#endif
 
 /*
  * Check if we need to run the ILB for updating blocked load before entering
