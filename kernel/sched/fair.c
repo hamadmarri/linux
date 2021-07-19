@@ -727,6 +727,7 @@ static void __enqueue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 	u64 now = sched_clock();
 	unsigned int score_se = calc_interactivity(now, se);
 	int is_idle_task = cn_has_idle_policy(se);
+	unsigned int IS_head;
 
 	se->next = NULL;
 	se->prev = NULL;
@@ -780,21 +781,22 @@ to_tail:
 		cfs_rq->head = se;
 		cfs_rq->tail = se;
 	}
+
+#ifdef CONFIG_CACULE_RDB
+	IS_head = calc_interactivity(sched_clock(), cfs_rq->head);
+	WRITE_ONCE(cfs_rq->IS_head, IS_head);
+#endif
 }
 
 static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 {
 	struct cacule_node *se = &(_se->cacule_node);
+	unsigned int IS_head = ~0;
 
 	// if only one se in rq
 	if (cfs_rq->head == cfs_rq->tail) {
 		cfs_rq->head = NULL;
 		cfs_rq->tail = NULL;
-
-#ifdef CONFIG_CACULE_RDB
-	WRITE_ONCE(cfs_rq->IS_head, ~0);
-#endif
-
 	} else if (se == cfs_rq->head) {
 		// if it is the head
 		cfs_rq->head		= cfs_rq->head->next;
@@ -813,6 +815,13 @@ static void __dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *_se)
 		if (next)
 			next->prev = prev;
 	}
+
+#ifdef CONFIG_CACULE_RDB
+	if (cfs_rq->head)
+		IS_head = calc_interactivity(sched_clock(), cfs_rq->head);
+
+	WRITE_ONCE(cfs_rq->IS_head, IS_head);
+#endif
 }
 
 struct sched_entity *__pick_first_entity(struct cfs_rq *cfs_rq)
