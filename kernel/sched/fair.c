@@ -679,9 +679,14 @@ calc_starve_score(u64 now, struct cacule_node *cn)
 	return score;
 }
 
-static inline int cn_has_idle_policy(struct cacule_node *se)
+static inline int cn_has_idle_policy(struct cacule_node *cn)
 {
-	return task_has_idle_policy(task_of(se_of(se)));
+	struct sched_entity *se = se_of(cn);
+
+	if (!entity_is_task(se))
+		return false;
+
+	return task_has_idle_policy(task_of(se));
 }
 
 static inline int
