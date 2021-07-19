@@ -7681,19 +7681,16 @@ again:
 
 			if (se_depth <= pse_depth) {
 				put_prev_entity(cfs_rq_of(pse), pse);
-				update_IS_head(cfs_rq_of(pse));
 				pse = parent_entity(pse);
 			}
 			if (se_depth >= pse_depth) {
 				set_next_entity(cfs_rq_of(se), se);
-				update_IS_head(cfs_rq_of(se));
 				se = parent_entity(se);
 			}
 		}
 
 		put_prev_entity(cfs_rq, pse);
 		set_next_entity(cfs_rq, se);
-		update_IS_head(cfs_rq);
 	}
 
 	goto done;
@@ -7706,7 +7703,6 @@ simple:
 		se = pick_next_entity(cfs_rq, NULL);
 		set_next_entity(cfs_rq, se);
 		cfs_rq = group_cfs_rq(se);
-		update_IS_head(cfs_rq);
 	} while (cfs_rq);
 
 	p = task_of(se);
