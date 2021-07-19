@@ -11613,9 +11613,6 @@ static void try_push_any(struct rq *this_rq)
 	int src_cpu = cpu_of(this_rq);
 	int cores_round = 1;
 
-	if (!entity_is_task(se_of(this_rq->cfs.head)))
-		return;
-
 again:
 	for_each_online_cpu(dst_cpu) {
 
