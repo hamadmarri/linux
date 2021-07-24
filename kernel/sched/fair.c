@@ -26,6 +26,11 @@
  */
 #include "sched.h"
 
+#ifdef CONFIG_CACULE_SCHED
+unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
+unsigned int __read_mostly interactivity_factor		= 32768;
+#endif
+
 /*
  * Targeted preemption latency for CPU-bound tasks:
  *
@@ -120,17 +125,6 @@ int __weak arch_asym_cpu_priority(int cpu)
  * (default: ~20%)
  */
 #define fits_capacity(cap, max)	((cap) * 1280 < (max) * 1024)
-
-#endif
-#ifdef CONFIG_CACULE_SCHED
-unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
-unsigned int __read_mostly interactivity_factor		= 32768;
-
-#ifdef CONFIG_FAIR_GROUP_SCHED
-unsigned int __read_mostly interactivity_threshold	= 0;
-#else
-unsigned int __read_mostly interactivity_threshold	= 1000;
-#endif
 
 #endif
 
@@ -623,14 +617,6 @@ calc_interactivity(u64 now, struct cacule_node *se)
 		score_se = _2m - (u64_factor_m / (vr_se / sleep_se));
 
 	return score_se;
-}
-
-static inline int is_interactive(struct cacule_node *cn)
-{
-	if (!interactivity_threshold || se_of(cn)->vruntime == 0)
-		return 0;
-
-	return calc_interactivity(sched_clock(), cn) < interactivity_threshold;
 }
 
 static inline int cn_has_idle_policy(struct cacule_node *se)
@@ -7062,56 +7048,6 @@ fail:
 }
 #endif /* CONFIG_CACULE_SCHED */
 
-#ifdef CONFIG_CACULE_SCHED
-static int
-find_least_IS_cpu(struct task_struct *p)
-{
-	struct cfs_rq *cfs_rq;
-	unsigned int max_IS = 0;
-	unsigned int IS, IS_c, IS_h;
-	struct sched_entity *curr_se;
-	struct cacule_node *cn, *head;
-	int cpu_i;
-	int new_cpu = -1;
-
-	for_each_online_cpu(cpu_i) {
-		if (!cpumask_test_cpu(cpu_i, p->cpus_ptr))
-			continue;
-
-		cn = NULL;
-		cfs_rq = &cpu_rq(cpu_i)->cfs;
-
-		curr_se = cfs_rq->curr;
-		head = cfs_rq->head;
-
-		if (!curr_se && head)
-			cn = head;
-		else if (curr_se && !head)
-			cn = &curr_se->cacule_node;
-		else if (curr_se && head) {
-			IS_c = calc_interactivity(sched_clock(), &curr_se->cacule_node);
-			IS_h = calc_interactivity(sched_clock(), head);
-
-			IS = IS_c > IS_h? IS_c : IS_h;
-			goto compare;
-		}
-
-		if (!cn)
-			return cpu_i;
-
-		IS = calc_interactivity(sched_clock(), cn);
-
-compare:
-		if (IS > max_IS) {
-			max_IS = IS;
-			new_cpu = cpu_i;
-		}
-	}
-
-	return new_cpu;
-}
-#endif
-
 /*
  * select_task_rq_fair: Select target runqueue for the waking task in domains
  * that have the 'sd_flag' flag set. In practice, this is SD_BALANCE_WAKE,
@@ -7133,27 +7069,8 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	int want_affine = 0;
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 
-#ifdef CONFIG_CACULE_SCHED
-	struct sched_entity *se = &p->se;
-
-	if (!is_interactive(&se->cacule_node))
-		goto cfs_way;
-
-	// check first if the prev cpu
-	// has 0 tasks
-	if (cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
-	    cpu_rq(prev_cpu)->cfs.nr_running == 0)
-		return prev_cpu;
-
-	new_cpu = find_least_IS_cpu(p);
-
-	if (new_cpu != -1)
-		return new_cpu;
-
-	new_cpu = prev_cpu;
-cfs_way:
-#else
-	if (sd_flag & SD_BALANCE_WAKE) {
+#if !defined(CONFIG_CACULE_SCHED)
+	if (wake_flags & WF_TTWU) {
 		record_wakee(p);
 
 		if (sched_energy_enabled()) {
@@ -7165,7 +7082,7 @@ cfs_way:
 
 		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 	}
-#endif /* CONFIG_CACULE_SCHED */
+#endif
 
 	rcu_read_lock();
 	for_each_domain(cpu, tmp) {
