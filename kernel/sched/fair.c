@@ -29,13 +29,6 @@
 #ifdef CONFIG_CACULE_SCHED
 unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
 unsigned int __read_mostly interactivity_factor		= 32768;
-
-#ifdef CONFIG_FAIR_GROUP_SCHED
-unsigned int __read_mostly interactivity_threshold	= 0;
-#else
-unsigned int __read_mostly interactivity_threshold	= 1000;
-#endif
-
 #endif
 
 /*
@@ -643,17 +636,14 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	return score_se;
 }
 
-static inline int is_interactive(struct cacule_node *cn)
+static inline int cn_has_idle_policy(struct cacule_node *cn)
 {
-	if (!interactivity_threshold || se_of(cn)->vruntime == 0)
-		return 0;
+	struct sched_entity *se = se_of(cn);
 
-	return calc_interactivity(sched_clock(), cn) < interactivity_threshold;
-}
+	if (!entity_is_task(se))
+		return false;
 
-static inline int cn_has_idle_policy(struct cacule_node *se)
-{
-	return task_has_idle_policy(task_of(se_of(se)));
+	return task_has_idle_policy(task_of(se));
 }
 
 static inline int
@@ -3425,7 +3415,7 @@ void reweight_task(struct task_struct *p, int prio)
  *
  *                     tg->weight * grq->load.weight
  *   ge->load.weight = -----------------------------               (1)
- *			  \Sum grq->load.weight
+ *                       \Sum grq->load.weight
  *
  * Now, because computing that sum is prohibitively expensive to compute (been
  * there, done that) we approximate it with this average stuff. The average
@@ -3439,7 +3429,7 @@ void reweight_task(struct task_struct *p, int prio)
  *
  *                     tg->weight * grq->avg.load_avg
  *   ge->load.weight = ------------------------------              (3)
- *				tg->load_avg
+ *                             tg->load_avg
  *
  * Where: tg->load_avg ~= \Sum grq->avg.load_avg
  *
@@ -3455,7 +3445,7 @@ void reweight_task(struct task_struct *p, int prio)
  *
  *                     tg->weight * grq->load.weight
  *   ge->load.weight = ----------------------------- = tg->weight   (4)
- *			    grp->load.weight
+ *                         grp->load.weight
  *
  * That is, the sum collapses because all other CPUs are idle; the UP scenario.
  *
@@ -3474,7 +3464,7 @@ void reweight_task(struct task_struct *p, int prio)
  *
  *                     tg->weight * grq->load.weight
  *   ge->load.weight = -----------------------------		   (6)
- *				tg_load_avg'
+ *                             tg_load_avg'
  *
  * Where:
  *
@@ -4002,15 +3992,15 @@ update_cfs_rq_load_avg(u64 now, struct cfs_rq *cfs_rq)
 
 		r = removed_load;
 		sub_positive(&sa->load_avg, r);
-		sub_positive(&sa->load_sum, r * divider);
+		sa->load_sum = sa->load_avg * divider;
 
 		r = removed_util;
 		sub_positive(&sa->util_avg, r);
-		sub_positive(&sa->util_sum, r * divider);
+		sa->util_sum = sa->util_avg * divider;
 
 		r = removed_runnable;
 		sub_positive(&sa->runnable_avg, r);
-		sub_positive(&sa->runnable_sum, r * divider);
+		sa->runnable_sum = sa->runnable_avg * divider;
 
 		/*
 		 * removed_runnable is the unweighted version of removed_load so we
@@ -6965,7 +6955,10 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 	struct cpumask *pd_mask = perf_domain_span(pd);
 	unsigned long cpu_cap = arch_scale_cpu_capacity(cpumask_first(pd_mask));
 	unsigned long max_util = 0, sum_util = 0;
+	unsigned long _cpu_cap = cpu_cap;
 	int cpu;
+
+	_cpu_cap -= arch_scale_thermal_pressure(cpumask_first(pd_mask));
 
 	/*
 	 * The capacity state of CPUs of the current rd can be driven by CPUs
@@ -7002,8 +6995,10 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 		 * is already enough to scale the EM reported power
 		 * consumption at the (eventually clamped) cpu_capacity.
 		 */
-		sum_util += effective_cpu_util(cpu, util_running, cpu_cap,
-					       ENERGY_UTIL, NULL);
+		cpu_util = effective_cpu_util(cpu, util_running, cpu_cap,
+					      ENERGY_UTIL, NULL);
+
+		sum_util += min(cpu_util, _cpu_cap);
 
 		/*
 		 * Performance domain frequency: utilization clamping
@@ -7014,7 +7009,7 @@ compute_energy(struct task_struct *p, int dst_cpu, struct perf_domain *pd)
 		 */
 		cpu_util = effective_cpu_util(cpu, util_freq, cpu_cap,
 					      FREQUENCY_UTIL, tsk);
-		max_util = max(max_util, cpu_util);
+		max_util = max(max_util, min(cpu_util, _cpu_cap));
 	}
 
 	return em_cpu_energy(pd->em_pd, max_util, sum_util);
@@ -7165,56 +7160,6 @@ fail:
 }
 #endif /* CONFIG_CACULE_SCHED */
 
-#ifdef CONFIG_CACULE_SCHED
-static int
-find_least_IS_cpu(struct task_struct *p)
-{
-	struct cfs_rq *cfs_rq;
-	unsigned int max_IS = 0;
-	unsigned int IS, IS_c, IS_h;
-	struct sched_entity *curr_se;
-	struct cacule_node *cn, *head;
-	int cpu_i;
-	int new_cpu = -1;
-
-	for_each_online_cpu(cpu_i) {
-		if (!cpumask_test_cpu(cpu_i, p->cpus_ptr))
-			continue;
-
-		cn = NULL;
-		cfs_rq = &cpu_rq(cpu_i)->cfs;
-
-		curr_se = cfs_rq->curr;
-		head = cfs_rq->head;
-
-		if (!curr_se && head)
-			cn = head;
-		else if (curr_se && !head)
-			cn = &curr_se->cacule_node;
-		else if (curr_se && head) {
-			IS_c = calc_interactivity(sched_clock(), &curr_se->cacule_node);
-			IS_h = calc_interactivity(sched_clock(), head);
-
-			IS = IS_c > IS_h? IS_c : IS_h;
-			goto compare;
-		}
-
-		if (!cn)
-			return cpu_i;
-
-		IS = calc_interactivity(sched_clock(), cn);
-
-compare:
-		if (IS > max_IS) {
-			max_IS = IS;
-			new_cpu = cpu_i;
-		}
-	}
-
-	return new_cpu;
-}
-#endif
-
 /*
  * select_task_rq_fair: Select target runqueue for the waking task in domains
  * that have the relevant SD flag set. In practice, this is SD_BALANCE_WAKE,
@@ -7238,26 +7183,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int wake_flags)
 	/* SD_flags and WF_flags share the first nibble */
 	int sd_flag = wake_flags & 0xF;
 
-#ifdef CONFIG_CACULE_SCHED
-	struct sched_entity *se = &p->se;
-
-	if (!is_interactive(&se->cacule_node))
-		goto cfs_way;
-
-	// check first if the prev cpu
-	// has 0 tasks
-	if (cpumask_test_cpu(prev_cpu, p->cpus_ptr) &&
-	    cpu_rq(prev_cpu)->cfs.nr_running == 0)
-		return prev_cpu;
-
-	new_cpu = find_least_IS_cpu(p);
-
-	if (new_cpu != -1)
-		return new_cpu;
-
-	new_cpu = prev_cpu;
-cfs_way:
-#else
+#if !defined(CONFIG_CACULE_SCHED)
 	if (wake_flags & WF_TTWU) {
 		record_wakee(p);
 
