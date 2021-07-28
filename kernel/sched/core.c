@@ -6114,10 +6114,8 @@ static void do_sched_yield(void)
 	struct task_struct *curr = current;
 	struct cacule_node *cn = &curr->se.cacule_node;
 
-	if (sched_yield_type) {
+	if (sched_yield_type)
 		cn->vruntime |= YIELD_MARK;
-		return;
-	}
 #endif
 	rq = this_rq_lock_irq(&rf);
 
