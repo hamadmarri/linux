@@ -29,6 +29,12 @@
 #ifdef CONFIG_CACULE_SCHED
 unsigned int __read_mostly cacule_max_lifetime		= 22000; // in ms
 unsigned int __read_mostly interactivity_factor		= 32768;
+
+unsigned int __read_mostly cache_factor			= 13107;
+unsigned int __read_mostly cache_divisor		= 1000000; // 1ms
+
+unsigned int __read_mostly starve_factor		= 19660;
+unsigned int __read_mostly starve_divisor		= 3000000; // 3ms
 #endif
 
 /*
@@ -636,6 +642,60 @@ calc_interactivity(u64 now, struct cacule_node *se)
 	return score_se;
 }
 
+static unsigned int
+calc_cache_score(u64 now, struct cacule_node *cn)
+{
+	struct sched_entity *se = se_of(cn);
+	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	u64 c_div = cache_divisor;
+	u64 cache_period = 1ULL;
+	u64 u64_factor_m = cache_factor;
+	u64 _2m = u64_factor_m << 1;
+	unsigned int score;
+
+	if (!cache_factor)
+		return 0;
+
+	if (se == cfs_rq->curr)
+		return 0;
+
+	cache_period = (now - se->exec_start) | 1;
+
+	if (c_div >= cache_period)
+		score = u64_factor_m / (c_div / cache_period);
+	else
+		score = _2m - (u64_factor_m / (cache_period / c_div));
+
+	return score;
+}
+
+static unsigned int
+calc_starve_score(u64 now, struct cacule_node *cn)
+{
+	struct sched_entity *se = se_of(cn);
+	struct cfs_rq *cfs_rq = cfs_rq_of(se);
+	u64 s_div = starve_divisor;
+	u64 starving = 1ULL;
+	u64 u64_factor_m = starve_factor;
+	u64 _2m = u64_factor_m << 1;
+	unsigned int score;
+
+	if (!starve_factor)
+		return 0;
+
+	if (se == cfs_rq->curr)
+		return _2m;
+
+	starving = (now - cn->last_run) | 1;
+
+	if (s_div >= starving)
+		score = _2m - (u64_factor_m / (s_div / starving));
+	else
+		score = u64_factor_m / (starving / s_div);
+
+	return score;
+}
+
 static inline int cn_has_idle_policy(struct cacule_node *cn)
 {
 	struct sched_entity *se = se_of(cn);
@@ -691,8 +751,13 @@ entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
 	if (is_curr_idle && !is_se_idle)
 		return 1;
 
-	score_curr	= calc_interactivity(now, curr);
-	score_se	= calc_interactivity(now, se);
+	score_curr	 = calc_interactivity(now, curr);
+	score_curr	+= calc_cache_score(now, curr);
+	score_curr	+= calc_starve_score(now, curr);
+
+	score_se	 = calc_interactivity(now, se);
+	score_se	+= calc_cache_score(now, se);
+	score_se	+= calc_starve_score(now, se);
 
 	diff		= score_se - score_curr;
 
@@ -1124,6 +1189,7 @@ static void update_curr(struct cfs_rq *cfs_rq)
 	schedstat_add(cfs_rq->exec_clock, delta_exec);
 
 #ifdef CONFIG_CACULE_SCHED
+	curr->cacule_node.last_run = now;
 	delta_fair = calc_delta_fair(delta_exec, curr);
 	curr->vruntime += delta_fair;
 	curr->cacule_node.vruntime += delta_fair;
@@ -1332,6 +1398,7 @@ update_stats_curr_start(struct cfs_rq *cfs_rq, struct sched_entity *se)
 	 */
 #ifdef CONFIG_CACULE_SCHED
 	se->exec_start = sched_clock();
+	se->cacule_node.last_run = sched_clock();
 #else
 	se->exec_start = rq_clock_task(rq_of(cfs_rq));
 #endif
@@ -4732,14 +4799,16 @@ dequeue_entity(struct cfs_rq *cfs_rq, struct sched_entity *se, int flags)
 }
 
 #ifdef CONFIG_CACULE_SCHED
+static struct sched_entity *
+pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr);
+
 /*
  * Preempt the current task with a newly woken task if needed:
  */
 static void
 check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
-	// does head have higher IS than curr
-	if (entity_before(sched_clock(), &curr->cacule_node, cfs_rq->head) == 1)
+	if (pick_next_entity(cfs_rq, curr) != curr)
 		resched_curr(rq_of(cfs_rq));
 }
 #else
@@ -4822,12 +4891,22 @@ static struct sched_entity *
 pick_next_entity(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 {
 	struct cacule_node *se = cfs_rq->head;
+	struct cacule_node *next;
+	u64 now = sched_clock();
 
 	if (unlikely(!se))
-		se = &curr->cacule_node;
-	else if (unlikely(curr
-			&& entity_before(sched_clock(), se, &curr->cacule_node) == 1))
-		se = &curr->cacule_node;
+		return curr;
+
+	next = se->next;
+	while (next) {
+		if (entity_before(now, se, next) == 1)
+			se = next;
+
+		next = next->next;
+	}
+
+	if (curr && entity_before(now, se, &curr->cacule_node) == 1)
+		return curr;
 
 	return se_of(se);
 }
