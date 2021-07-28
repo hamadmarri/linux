@@ -1675,8 +1675,8 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 	{
-		.procname	= "yield_type",
-		.data		= &sched_yield_type,
+		.procname	= "sched_cacule_yield",
+		.data		= &cacule_yield,
 		.maxlen		= sizeof (int),
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec_minmax,
