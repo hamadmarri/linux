@@ -4860,10 +4860,6 @@ static void put_prev_entity(struct cfs_rq *cfs_rq, struct sched_entity *prev)
 		update_load_avg(cfs_rq, prev, 0);
 	}
 
-#ifdef CONFIG_CACULE_SCHED
-	prev->cacule_node.vruntime &= YIELD_UNMARK;
-#endif
-
 	cfs_rq->curr = NULL;
 }
 
@@ -7483,6 +7479,11 @@ simple:
 		set_next_entity(cfs_rq, se);
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
+
+#ifdef CONFIG_CACULE_SCHED
+	if (prev)
+		prev->se.cacule_node.vruntime &= YIELD_UNMARK;
+#endif
 
 	p = task_of(se);
 
