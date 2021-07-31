@@ -702,6 +702,16 @@ entity_before(u64 now, struct cacule_node *curr, struct cacule_node *se)
 	return -1;
 }
 
+static void update_IS(struct cfs_rq *cfs_rq)
+{
+	if (cfs_rq->head) {
+		unsigned int IS_head = calc_interactivity(sched_clock(), cfs_rq->head);
+		WRITE_ONCE(cfs_rq->IS_head, IS_head);
+	} else if (cfs_rq->IS_head != ~0) {
+		WRITE_ONCE(cfs_rq->IS_head, ~0);
+	}
+}
+
 /*
  * Enqueue an entity
  */
@@ -759,6 +769,8 @@ to_tail:
 
 			// lastly reset the head
 			cfs_rq->head		= se;
+
+			update_IS(cfs_rq);
 		}
 	} else {
 		// if empty rq
@@ -4745,6 +4757,8 @@ check_preempt_tick(struct cfs_rq *cfs_rq, struct sched_entity *curr)
 	// does head have higher IS than curr
 	if (entity_before(sched_clock(), &curr->cacule_node, cfs_rq->head) == 1)
 		resched_curr(rq_of(cfs_rq));
+	else
+		update_IS(cfs_rq);
 }
 #else
 /*
@@ -7614,13 +7628,7 @@ simple:
 #ifdef CONFIG_CACULE_RDB
 	se = pick_next_entity(cfs_rq, NULL);
 	set_next_entity(cfs_rq, se);
-
-	if (cfs_rq->head) {
-		unsigned int IS_head = calc_interactivity(sched_clock(), cfs_rq->head);
-		WRITE_ONCE(cfs_rq->IS_head, IS_head);
-	} else {
-		WRITE_ONCE(cfs_rq->IS_head, ~0);
-	}
+	update_IS(cfs_rq);
 #else
 	do {
 		se = pick_next_entity(cfs_rq, NULL);
