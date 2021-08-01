@@ -7440,6 +7440,11 @@ again:
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
+	/*
+	 * Here we picked a sched_entity starting from
+	 * the same group of curr, but the task could
+	 * be a child of the selected sched_entity.
+	 */
 	p = task_of(se);
 
 	/*
@@ -7450,6 +7455,7 @@ again:
 	if (prev != p) {
 		struct sched_entity *pse = &prev->se;
 
+		/* while se and pse are not in the same group */
 		while (!(cfs_rq = is_same_group(se, pse))) {
 			int se_depth = se->depth;
 			int pse_depth = pse->depth;
@@ -7464,6 +7470,9 @@ again:
 			}
 		}
 
+		/* Here we reached the point were both
+		 * sched_entities are in the same group.
+		 */
 		put_prev_entity(cfs_rq, pse);
 		set_next_entity(cfs_rq, se);
 	}
