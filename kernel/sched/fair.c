@@ -7618,14 +7618,13 @@ simple:
 		cfs_rq = group_cfs_rq(se);
 	} while (cfs_rq);
 
+	p = task_of(se);
+
+done: __maybe_unused;
 #ifdef CONFIG_CACULE_SCHED
 	if (prev)
 		prev->se.cacule_node.vruntime &= YIELD_UNMARK;
 #endif
-
-	p = task_of(se);
-
-done: __maybe_unused;
 #ifdef CONFIG_SMP
 	/*
 	 * Move the next running task to the front of
