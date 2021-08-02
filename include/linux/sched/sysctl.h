@@ -36,6 +36,10 @@ extern unsigned int sysctl_sched_wakeup_granularity;
 extern unsigned int interactivity_factor;
 extern unsigned int cacule_max_lifetime;
 extern int cacule_yield;
+extern unsigned int cache_factor;
+extern unsigned int cache_divisor;
+extern unsigned int starve_factor;
+extern unsigned int starve_divisor;
 #endif
 
 enum sched_tunable_scaling {
