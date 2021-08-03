@@ -1752,15 +1752,6 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= proc_dointvec,
 	},
 	{
-		.procname	= "sched_cacule_yield",
-		.data		= &cacule_yield,
-		.maxlen		= sizeof (int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec_minmax,
-		.extra1		= SYSCTL_ZERO,
-		.extra2		= &one_ul,
-	},
-	{
 		.procname	= "sched_cache_factor",
 		.data		= &cache_factor,
 		.maxlen		= sizeof(unsigned int),
@@ -1787,6 +1778,15 @@ static struct ctl_table kern_table[] = {
 		.maxlen		= sizeof(unsigned int),
 		.mode		= 0644,
 		.proc_handler	= proc_dointvec,
+	},
+	{
+		.procname	= "sched_cacule_yield",
+		.data		= &cacule_yield,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.extra1		= SYSCTL_ZERO,
+		.extra2		= &one_ul,
 	},
 #endif
 #ifdef CONFIG_SCHEDSTATS
