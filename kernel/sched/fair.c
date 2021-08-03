@@ -7070,7 +7070,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 
 #if !defined(CONFIG_CACULE_SCHED)
-	if (wake_flags & WF_TTWU) {
+	if (sd_flag & SD_BALANCE_WAKE) {
 		record_wakee(p);
 
 		if (sched_energy_enabled()) {
@@ -7082,7 +7082,7 @@ select_task_rq_fair(struct task_struct *p, int prev_cpu, int sd_flag, int wake_f
 
 		want_affine = !wake_wide(p) && cpumask_test_cpu(cpu, p->cpus_ptr);
 	}
-#endif
+#endif /* CONFIG_CACULE_SCHED */
 
 	rcu_read_lock();
 	for_each_domain(cpu, tmp) {
