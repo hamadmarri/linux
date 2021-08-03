@@ -7092,7 +7092,11 @@ void __init sched_init(void)
 #endif
 
 #ifdef CONFIG_CACULE_SCHED
-	printk(KERN_INFO "CacULE CPU scheduler v5.10-r2 by Hamad Al Marri.");
+#ifdef CONFIG_CACULE_RDB
+	printk(KERN_INFO "CacULE CPU scheduler (RDB) v5.10-r3 by Hamad Al Marri.");
+#else
+	printk(KERN_INFO "CacULE CPU scheduler v5.10-r3 by Hamad Al Marri.");
+#endif
 #endif
 
 	wait_bit_init();
