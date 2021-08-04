@@ -8843,7 +8843,9 @@ static bool update_nohz_stats(struct rq *rq, bool force)
 	if (!force && !time_after(jiffies, rq->last_blocked_load_update_tick))
 		return true;
 
+#if !defined(CONFIG_CACULE_RDB)
 	update_blocked_averages(cpu);
+#endif
 
 	return rq->has_blocked_load;
 #else
@@ -10826,6 +10828,7 @@ out:
 	WRITE_ONCE(nohz.has_blocked, 1);
 }
 
+#if !defined(CONFIG_CACULE_RDB)
 /*
  * Internal function that runs load balance for all idle cpus. The load balance
  * can be a simple update of blocked load or a complete load balance with
@@ -10894,11 +10897,8 @@ static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 			rq_unlock_irqrestore(rq, &rf);
 
 			if (flags & NOHZ_BALANCE_KICK)
-#if !defined(CONFIG_CACULE_RDB)
 				rebalance_domains(rq, CPU_IDLE);
-#else
-				idle_try_pull_any(&rq->cfs);
-#endif
+
 		}
 
 		if (time_after(next_balance, rq->next_balance)) {
@@ -10915,6 +10915,7 @@ static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 	if (likely(update_next_balance))
 		nohz.next_balance = next_balance;
 
+#if !defined(CONFIG_CACULE_RDB)
 	/* Newly idle CPU doesn't need an update */
 	if (idle != CPU_NEWLY_IDLE) {
 		update_blocked_averages(this_cpu);
@@ -10923,6 +10924,7 @@ static bool _nohz_idle_balance(struct rq *this_rq, unsigned int flags,
 
 	if (flags & NOHZ_BALANCE_KICK)
 		rebalance_domains(this_rq, CPU_IDLE);
+#endif
 
 	WRITE_ONCE(nohz.next_blocked,
 		now + msecs_to_jiffies(LOAD_AVG_PERIOD));
@@ -10938,7 +10940,6 @@ abort:
 	return ret;
 }
 
-#if !defined(CONFIG_CACULE_RDB)
 /*
  * In CONFIG_NO_HZ_COMMON case, the idle balance kickee will do the
  * rebalancing for all the cpus for whom scheduler ticks are stopped.
@@ -10959,7 +10960,6 @@ static bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle)
 
 	return true;
 }
-#endif
 
 static void nohz_newidle_balance(struct rq *this_rq)
 {
@@ -10994,6 +10994,7 @@ static void nohz_newidle_balance(struct rq *this_rq)
 		kick_ilb(NOHZ_STATS_KICK);
 	raw_spin_lock(&this_rq->lock);
 }
+#endif
 
 #else /* !CONFIG_NO_HZ_COMMON */
 #if !defined(CONFIG_CACULE_RDB)
@@ -11003,9 +11004,9 @@ static inline bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle
 {
 	return false;
 }
-#endif
 
 static inline void nohz_newidle_balance(struct rq *this_rq) { }
+#endif
 
 #endif /* CONFIG_NO_HZ_COMMON */
 
@@ -11239,8 +11240,6 @@ out:
 
 	if (pulled_task)
 		this_rq->idle_stamp = 0;
-	else
-		nohz_newidle_balance(this_rq);
 
 	rq_repin_lock(this_rq, rf);
 
