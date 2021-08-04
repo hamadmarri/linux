@@ -7551,7 +7551,9 @@ done: __maybe_unused;
 	if (prev)
 		prev->se.cacule_node.vruntime &= YIELD_UNMARK;
 
+#ifdef CONFIG_CACULE_RDB
 	update_IS(rq);
+#endif
 #endif
 #ifdef CONFIG_SMP
 	/*
