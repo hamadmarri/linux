@@ -1090,6 +1090,10 @@ ORed together. The letters are seen in "Tainted" line of Oops reports.
 
 See Documentation/admin-guide/tainted-kernels.rst for more information.
 
+sched_interactivity_factor (CacULE scheduler only)
+==================================================
+Sets the value *m* for interactivity score calculations. See
+Figure 1 in https://web.cs.ucdavis.edu/~roper/ecs150/ULE.pdf
 
 threads-max:
 ============
