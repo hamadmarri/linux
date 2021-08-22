@@ -10546,7 +10546,7 @@ out:
 	return pulled_task;
 }
 #else
-static int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
+int newidle_balance(struct rq *this_rq, struct rq_flags *rf)
 {
 	unsigned long next_balance = jiffies + HZ;
 	int this_cpu = this_rq->cpu;
