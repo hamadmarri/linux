@@ -11150,9 +11150,9 @@ static inline bool nohz_idle_balance(struct rq *this_rq, enum cpu_idle_type idle
 {
 	return false;
 }
+#endif
 
 static inline void nohz_newidle_balance(struct rq *this_rq) { }
-#endif
 
 #endif /* CONFIG_NO_HZ_COMMON */
 
