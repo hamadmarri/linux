@@ -10743,7 +10743,7 @@ out:
  * run_rebalance_domains is triggered when needed from the scheduler tick.
  * Also triggered for nohz idle balancing (with nohz_balancing_kick set).
  */
-static __latent_entropy void run_rebalance_domains(struct softirq_action *h)
+void run_rebalance_domains_non_softirq(void)
 {
 	struct rq *this_rq = this_rq();
 	enum cpu_idle_type idle = this_rq->idle_balance ?
@@ -10778,7 +10778,7 @@ void trigger_load_balance(struct rq *rq)
 		return;
 
 	if (time_after_eq(jiffies, rq->next_balance))
-		raise_softirq(SCHED_SOFTIRQ);
+		run_rebalance_domains_non_softirq();
 
 	nohz_balancer_kick(rq);
 }
@@ -11387,7 +11387,6 @@ void show_numa_stats(struct task_struct *p, struct seq_file *m)
 __init void init_sched_fair_class(void)
 {
 #ifdef CONFIG_SMP
-	open_softirq(SCHED_SOFTIRQ, run_rebalance_domains);
 
 #ifdef CONFIG_NO_HZ_COMMON
 	nohz.next_balance = jiffies;
